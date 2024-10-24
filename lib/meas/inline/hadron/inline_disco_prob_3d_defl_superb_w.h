@@ -21,6 +21,21 @@ namespace Chroma
   {
     bool registerAll();
 
+    // Displacement list
+    using displacement_list_t = std::vector<std::vector<int>>;
+
+    // Momentum list
+    using mom_list_t = std::vector<std::vector<int>>;
+
+    // Displacements-momenta combo
+    struct displacements_moms_combo_t {
+      displacement_list_t displacement_list;
+      mom_list_t mom_list;
+    };
+
+    // Displacement-momenta combos
+    using displacements_moms_combos_t = std::vector<displacements_moms_combo_t>;
+
     //! Parameter structure
     /*! \ingroup inlinehadron */ 
     struct Params 
@@ -33,10 +48,11 @@ namespace Chroma
       struct Param_t
       {
 	int max_path_length ; /*! maximum displacement path in the z direction */
-	std::vector< std::vector<int>> alt_displacements;   /*!< Alternative displacement paths */
+	displacement_list_t alt_displacements;   /*!< Alternative displacement paths */
 	int mom2_min;               /*!< (mom)^2 >= mom2_min */
 	int mom2_max;               /*!< (mom)^2 <= mom2_max */
-	std::vector<std::vector<int>>  mom_list;        /*!< Alternative array of momenta to generate */
+	mom_list_t mom_list;	    /*!< Alternative array of momenta to generate */
+	displacements_moms_combos_t combos_list; /*!< Alternative list of disps and momenta */
 	std::vector<int>  t_sources;      /*!< Array of time slice sources */
 	std::string mass_label ; /*! a std::string flag maybe used in analysis*/
         int max_rhs;            /*! maximum number of linear systems solved simultaneously */

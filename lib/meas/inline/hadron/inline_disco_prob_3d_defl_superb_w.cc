@@ -36,6 +36,28 @@ namespace Chroma
   namespace InlineDiscoProb3dDeflSuperb
   {
 
+    //! Displacement-mom combo input
+    void read(XMLReader& xml, const std::string& path,
+	      displacements_moms_combo_t& input)
+    {
+      XMLReader inputtop(xml, path);
+
+      read(inputtop, "Displacements", input.displacement_list);
+      read(inputtop, "mom_list", input.mom_list);
+    }
+
+    //! Displacement-mom combo output
+    void write(XMLWriter& xml, const std::string& path,
+	       const displacements_moms_combo_t& input)
+    {
+      push(xml, path);
+
+      write(xml, "Displacements", input.displacement_list);
+      write(xml, "mom_list", input.mom_list);
+
+      pop(xml);
+    }
+
     //! Propagator input
     void read(XMLReader& xml, const std::string& path,
 	      InlineDiscoProb3dDeflSuperb::Params::NamedObject_t& input)
@@ -64,7 +86,12 @@ namespace Chroma
     {
       XMLReader inputtop(xml, path);
 
-      if (inputtop.count("Displacements") == 1)
+      if (inputtop.count("combos") == 1)
+      {
+	read(inputtop, "combos", param.combos_list);
+	param.max_path_length = -1;
+      }
+      else if (inputtop.count("Displacements") == 1)
       {
 	read(inputtop, "Displacements", param.alt_displacements);
 	param.max_path_length = -1;
@@ -324,10 +351,15 @@ namespace Chroma
     using Traces = MesonMap<std::vector<std::complex<double>>>;
     using TracesVariance = MesonMap<std::vector<double>>;
 
+    struct combo_t {
+      displacement_list_t displacement_list;
+      SB::CoorMoms mom_list;
+    };
+
     void do_disco(Traces& db, const std::vector<std::shared_ptr<LatticeFermion>>& qbar,
 		  const std::vector<std::shared_ptr<LatticeFermion>>& q,
-		  const SB::CoorMoms& mom_list, int t_source, const multi1d<LatticeColorMatrix>& u,
-		  const std::vector<std::vector<int>>& disps)
+		  const std::vector<combo_t>& combos, int t_source,
+		  const multi1d<LatticeColorMatrix>& u)
     {
 
       const int Nt = Layout::lattSize()[3];
@@ -364,45 +396,51 @@ namespace Chroma
 	}
       }
 
-      // Normalize paths: replace empty by [0]
-      std::vector<std::vector<int>> norm_disps;
-      norm_disps.reserve(disps.size());
-      for (const auto& it : disps)
-	norm_disps.push_back(it.size() == 0 ? std::vector<int>(1) : it);
+      for (const auto& combo : combos)
+      {
+	const auto& disps = combo.displacement_list;
+	const auto& mom_list = combo.mom_list;
 
-      // Contract S and Q with all the gammas, and apply the displacements
-      std::string order_out = "gmNnsqt*";
-      auto call = [&](SB::Tensor<8, SB::Complex> r, int disp_index, int tfrom, int mfrom) {
-	// Gather all traces at the master node
-	SB::Tensor<8, SB::Complex> con =
-	  r.make_sure(order_out, SB::OnHost, SB::OnMaster).getLocal();
+	// Normalize paths: replace empty by [0]
+	std::vector<std::vector<int>> norm_disps;
+	norm_disps.reserve(disps.size());
+	for (const auto& it : disps)
+	  norm_disps.push_back(it.size() == 0 ? std::vector<int>(1) : it);
 
-	// Do the update only on the master node
-	if (con)
-	{
-	  if (r.kvdim().at('t') != 1)
-	    throw std::runtime_error("wtf");
-	  for (int mom = 0; mom < mom_list.size(); ++mom)
+	// Contract S and Q with all the gammas, and apply the displacements
+	std::string order_out = "gmNnsqt*";
+	auto call = [&](SB::Tensor<8, SB::Complex> r, int disp_index, int tfrom, int mfrom) {
+	  // Gather all traces at the master node
+	  SB::Tensor<8, SB::Complex> con =
+	    r.make_sure(order_out, SB::OnHost, SB::OnMaster).getLocal();
+
+	  // Do the update only on the master node
+	  if (con)
 	  {
-	    MesonKey k{tfrom % Nt, norm_disps[disp_index], mom_list[mfrom + mom]};
-
-	    auto it = db.find(k);
-	    if (it == db.end())
-	      it = db.insert({k, std::vector<std::complex<double>>(Ns * Ns)}).first;
-
-	    for (int ai = 0; ai < a; ++ai)
+	    if (r.kvdim().at('t') != 1)
+	      throw std::runtime_error("wtf");
+	    for (int mom = 0; mom < mom_list.size(); ++mom)
 	    {
-	      for (int g = 0; g < Ns * Ns; ++g)
+	      MesonKey k{tfrom % Nt, norm_disps[disp_index], mom_list[mfrom + mom]};
+
+	      auto it = db.find(k);
+	      if (it == db.end())
+		it = db.insert({k, std::vector<std::complex<double>>(Ns * Ns)}).first;
+
+	      for (int ai = 0; ai < a; ++ai)
 	      {
-		it->second[g] += con.get({g, mom, 1, 1, 1, 1, 0, ai});
+		for (int g = 0; g < Ns * Ns; ++g)
+		{
+		  it->second[g] += con.get({g, mom, 1, 1, 1, 1, 0, ai});
+		}
 	      }
 	    }
 	  }
-	}
-      };
-      SB::doMomGammaDisp_contractions<8, Nd + 6, Nd + 6, SB::Complex>(
-	u, std::move(qbart), std::move(qt), t_source /* first t_slize */, 0 /* save from */,
-	1 /* save size */, mom_list, gamma_mats, disps, false /*no deriv*/, call, order_out);
+	};
+	SB::doMomGammaDisp_contractions<8, Nd + 6, Nd + 6, SB::Complex>(
+	  u, std::move(qbart), std::move(qt), t_source /* first t_slize */, 0 /* save from */,
+	  1 /* save size */, mom_list, gamma_mats, disps, false /*no deriv*/, call, order_out);
+      }
     }
 
     // Update the mean and var for each observable in db
@@ -701,32 +739,46 @@ namespace Chroma
       // Initialize the slow Fourier transform phases
       int decay_dir = Nd - 1; // hadamard needs this for now
 
-      //
-      // If a list of momenta has been specified only need phases corresponding to these
-      //
-      SB::CoorMoms mom_list;
-      if (params.param.mom_list.size() == 0)
+      // Read the list of displacements and momenta
+      std::vector<combo_t> disp_mom_combos;
+      if (params.param.combos_list.size() > 0)
       {
-	mom_list = SB::getMomenta(params.param.mom2_min, params.param.mom2_max);
+	// a) If the user provided combos, read the combos
+	for (const auto& combo : params.param.combos_list)
+	{
+	  disp_mom_combos.push_back(
+	    combo_t{combo.displacement_list, SB::getMomenta(combo.mom_list)});
+	}
       }
       else
       {
-	mom_list = SB::getMomenta(params.param.mom_list);
-      }
+	// b) If the user provided a list of momenta and displacements, make them into a combo
 
-      // Process the displacements
-      std::vector<std::vector<int>> disps;
-      if (params.param.max_path_length < 0)
-      {
-	disps = params.param.alt_displacements;
-      }
-      else
-      {
-	disps.push_back(std::vector<int>()); // no displacement
-	for (int i = 1; i <= params.param.max_path_length; ++i)
-	  disps.push_back(std::vector<int>(i, 3)); // displacements on positive z-dir
-	for (int i = 1; i <= params.param.max_path_length; ++i)
-	  disps.push_back(std::vector<int>(i, -3)); // displacements on negative z-dir
+	SB::CoorMoms mom_list;
+	if (params.param.mom_list.size() == 0)
+	{
+	  mom_list = SB::getMomenta(params.param.mom2_min, params.param.mom2_max);
+	}
+	else
+	{
+	  mom_list = SB::getMomenta(params.param.mom_list);
+	}
+
+	// Process the displacements
+	std::vector<std::vector<int>> disps;
+	if (params.param.max_path_length < 0)
+	{
+	  disps = params.param.alt_displacements;
+	}
+	else
+	{
+	  disps.push_back(std::vector<int>()); // no displacement
+	  for (int i = 1; i <= params.param.max_path_length; ++i)
+	    disps.push_back(std::vector<int>(i, 3)); // displacements on positive z-dir
+	  for (int i = 1; i <= params.param.max_path_length; ++i)
+	    disps.push_back(std::vector<int>(i, -3)); // displacements on negative z-dir
+	}
+	disp_mom_combos.push_back(combo_t{disps, mom_list});
       }
 
       // number of colors
@@ -767,8 +819,8 @@ namespace Chroma
 	  getU(proj, k, uk);
 
 	  // Added to dbdet the results of \Omega*P*inv(A)=\Omega*V*inv(U'*A*V)*U', where \Omega are
-	  do_disco(dbdet, uk, vk, mom_list, params.param.t_sources.at(0),
-		   params.param.use_ferm_state_links ? state->getLinks() : u, disps);
+	  do_disco(dbdet, uk, vk, disp_mom_combos, params.param.t_sources.at(0),
+		   params.param.use_ferm_state_links ? state->getLinks() : u);
 	}
       }
 
@@ -864,8 +916,8 @@ namespace Chroma
 	  // local operators in spin and space
 	  StopWatch swatch_dots;
 	  swatch_dots.start();
-	  do_disco(db, v_chi, v_q, mom_list, params.param.t_sources.at(0),
-		   params.param.use_ferm_state_links ? state->getLinks() : u, disps);
+	  do_disco(db, v_chi, v_q, disp_mom_combos, params.param.t_sources.at(0),
+		   params.param.use_ferm_state_links ? state->getLinks() : u);
 	  swatch_dots.stop();
 	  QDPIO::cout << "Computing inner products " << swatch_dots.getTimeInSeconds() << " secs"
 		      << std::endl;

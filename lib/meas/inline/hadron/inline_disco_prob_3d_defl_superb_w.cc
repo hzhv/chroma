@@ -66,6 +66,8 @@ namespace Chroma
 
       read(inputtop, "gauge_id", input.gauge_id);
       read(inputtop, "sdb_file", input.sdb_file);
+      if (inputtop.count("defl_sdb_file") == 1)
+	read(inputtop, "defl_sdb_file", input.defl_sdb_file);
     }
 
     //! Propagator output
@@ -76,6 +78,7 @@ namespace Chroma
 
       write(xml, "gauge_id", input.gauge_id);
       write(xml, "sdb_file", input.sdb_file);
+      write(xml, "delf_sdb_file", input.defl_sdb_file);
 
       pop(xml);
     }
@@ -821,6 +824,54 @@ namespace Chroma
 	  // Added to dbdet the results of \Omega*P*inv(A)=\Omega*V*inv(U'*A*V)*U', where \Omega are
 	  do_disco(dbdet, uk, vk, disp_mom_combos, params.param.t_sources.at(0),
 		   params.param.use_ferm_state_links ? state->getLinks() : u);
+	}
+
+	// write out just the contribution of the projector on the loop
+	if (Layout::nodeNumber() == 0 && params.named_obj.defl_sdb_file.size() > 0)
+	{
+	  // DB storage
+	  LocalBinaryStoreDB<LocalSerialDBKey<KeyOperator_t>, LocalSerialDBData<ValOperator_t>>
+	    qdp_db;
+
+	  // Open the file, and write the meta-data and the binary for this operator
+	  XMLBufferWriter file_xml;
+
+	  push(file_xml, "DBMetaData");
+	  write(file_xml, "id", std::string("DiscoBlocks"));
+	  write(file_xml, "lattSize", QDP::Layout::lattSize());
+	  write(file_xml, "decay_dir", decay_dir);
+	  write(file_xml, "Params", params.param);
+	  write(file_xml, "Config_info", gauge_xml);
+	  write(file_xml, "first_computed_color", 0);
+	  write(file_xml, "num_computed_colors", 0);
+	  write(file_xml, "num_colors", 0);
+	  write(file_xml, "deflation_rank", rank);
+	  pop(file_xml);
+
+	  std::string file_str(file_xml.str());
+	  qdp_db.setMaxUserInfoLen(file_str.size());
+
+	  //Slightly modify code to account for changes from multifile write.
+	  //Be consistent with old mode of filename write.
+	  std::string file_name = params.named_obj.defl_sdb_file;
+	  qdp_db.open(file_name, O_RDWR | O_CREAT, 0664);
+
+	  qdp_db.insertUserdata(file_str);
+
+	  KeyOperator_t key;
+	  ValOperator_t val;
+	  // Store all the data
+	  for (const auto& it : dbdet)
+	  {
+	    key.t_slice = it.first.t_slice;
+	    key.disp = SB::tomulti1d(it.first.disp);
+	    key.mom = SB::tomulti1d(it.first.mom);
+	    key.mass_label = params.param.mass_label;
+	    for (int i = 0; i < Ns * Ns; i++)
+	      val.set({i}, it.second[i]);
+	    qdp_db.insert(key, val);
+	  }
+	  qdp_db.close();
 	}
       }
 

@@ -70,6 +70,7 @@ namespace Chroma
       {
 	std::string     gauge_id;    /*!< Gauge field */
 	std::string     sdb_file;    /*!< the db file to store loops */
+	std::string     defl_sdb_file;    /*!< the db file to store the deterministic part of the loops */
       } named_obj;
 
       std::string xml_file;  // Alternate XML file pattern

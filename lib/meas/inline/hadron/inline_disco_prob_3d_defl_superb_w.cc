@@ -441,8 +441,8 @@ namespace Chroma
 	  }
 	};
 	SB::doMomGammaDisp_contractions<8, Nd + 6, Nd + 6, SB::Complex>(
-	  u, std::move(qbart), std::move(qt), t_source /* first t_slize */, 0 /* save from */,
-	  1 /* save size */, mom_list, gamma_mats, disps, false /*no deriv*/, call, order_out);
+	  u, qbart, qt, t_source /* first t_slize */, 0 /* save from */, 1 /* save size */,
+	  mom_list, gamma_mats, disps, false /*no deriv*/, call, order_out);
       }
     }
 

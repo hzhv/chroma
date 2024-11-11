@@ -395,7 +395,18 @@ namespace Chroma {
 				  mg_param.vec_outfile[l][0] = '\0';
 				}
 				QDPIO::cout<<"Basic MULTIGRID params copied."<<std::endl;
+
+				if( ip.got_mg_eig_params) {
+					int n_defl_levels = ip.mg_eig_params.size();
+					QDPIO::cout << "MULTIGRID specified deflation on " << n_defl_levels << " levels\n";
+					for( int i=0; i < n_defl_levels; i++) {
+						QDPIO::cout << "Setting deflatiop params on level \n";
+						int d_level = ip.mg_eig_params[i].level;
+						mg_param.eig_param[d_level] = const_cast<QudaEigParam*>(&(ip.mg_eig_params[i].eig_p));
+					}
+				}
 			}
+
 			// setup the multigrid solver
 			// this allocates memory
 			QDPIO::cout << "About to Call newMultigridQuda" << std::endl;

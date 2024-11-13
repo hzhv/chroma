@@ -21,7 +21,7 @@ namespace Chroma
     readQudaBool(paramtop, "./ComputeSVD", p.compute_svd, false);
     readQudaBool(paramtop, "./ComputeGamma5", p.compute_gamma5, false);
     readQudaBool(paramtop, "./RequireConvergence", p.require_convergence, true);
-    readOptional(paramtop, "./SpectrumType", p.spectrum, QUDA_SPECTRUM_LR_EIG);
+    readOptional(paramtop, "./SpectrumType", p.spectrum, QUDA_SPECTRUM_SR_EIG); // Deflation uses SR mostly
     readOptional(paramtop, "./NEv", p.n_ev);
     readOptional(paramtop, "./NKr", p.n_kr );
     readOptional(paramtop, "./NLockedMax", p.nLockedMax);

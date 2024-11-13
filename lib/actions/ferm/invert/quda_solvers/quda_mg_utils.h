@@ -177,14 +177,16 @@ namespace Chroma {
 				}
 #endif
 				mg_inv_param.gcrNkrylov = ip.precond_gcr_nkrylov;
-				if( ip.verbosity == true ) {
+				if( invParam.verboseP == true ) {
 					mg_inv_param.verbosity = QUDA_VERBOSE;
 				}
 				else {
 					mg_inv_param.verbosity = QUDA_SUMMARIZE;
 				}
 
-
+				for(int i=0; i < ip.mg_levels; i++) { 
+					mg_param.verbosity[i] =ip.verbosity ? QUDA_VERBOSE : QUDA_SILENT;
+				}
 
 
 				mg_inv_param.verbosity_precondition = QUDA_SILENT;
@@ -397,11 +399,15 @@ namespace Chroma {
 				QDPIO::cout<<"Basic MULTIGRID params copied."<<std::endl;
 
 				if( ip.got_mg_eig_params) {
+					for(int i=0; i < mg_param.n_level; i++) {
+						mg_param.use_eig_solver[i]=QUDA_BOOLEAN_FALSE;
+					}
 					int n_defl_levels = ip.mg_eig_params.size();
 					QDPIO::cout << "MULTIGRID specified deflation on " << n_defl_levels << " levels\n";
 					for( int i=0; i < n_defl_levels; i++) {
-						QDPIO::cout << "Setting deflatiop params on level \n";
 						int d_level = ip.mg_eig_params[i].level;
+						QDPIO::cout << "Setting Eigenvalue params on level " << d_level << "\n";
+						mg_param.use_eig_solver[d_level] = QUDA_BOOLEAN_TRUE;
 						mg_param.eig_param[d_level] = const_cast<QudaEigParam*>(&(ip.mg_eig_params[i].eig_p));
 					}
 				}

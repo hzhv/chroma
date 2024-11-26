@@ -412,6 +412,12 @@ Example:
             <decay_dir>3</decay_dir>
             <use_device_for_contractions>true</use_device_for_contractions>
             <max_rhs>1</max_rhs>
+            <phases>
+              <elem>
+                <source>0 0 0</source>
+                <sink>0 0 0</sink>
+              </elem>
+            </phases>
           </Contractions>
           <Propagator>
             <version>10</version>
@@ -476,7 +482,7 @@ Main options:
 * `Param/Contractions/Nt_backward`: number of sink time slices to compute previous to each value in `t_sources`.
 * `Param/Contractions/mass_label`: mass label, used by `redstar`.
 * `Param/Contractions/max_rhs`: (optional, default is 8) number of right-hand-sides to invert at once.
-* `Param/Contractions/phase`: (optional, default `0 0 0`) spatial phasing on the eigenvectors.
+* `Param/Contractions/phases`: (optional, default is not phasing) list of source-sink pairs of spatial phasing on the eigenvectors.
 * `Param/Contractions/use_device_for_contractions`: (optional, default `true`) whether to use the GPUs for the contractions if available.
 * `Param/Propagator`: propagator configuration.
 * `NamedObject/colorvec_files`: list of files with distillation basis.

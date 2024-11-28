@@ -36,6 +36,8 @@
 
 #include "chroma_config.h"
 
+#include <set>
+
 #ifdef BUILD_SB
 
 namespace Chroma 
@@ -318,11 +320,11 @@ namespace Chroma
 
       // Parse the phase
       std::vector<SB::Coor<3>> phasings;	     ///< list of all phasings
-      std::map<int, std::vector<int>> phasing_pairs; ///< phasing src -> list of phasing sink
+      std::map<int, std::set<int>> phasing_pairs;    ///< phasing src -> list of phasing sink
       if (params.param.contract.phase.size() > 0)
       {
 	phasings.push_back(SB::toCoor(params.param.contract.phase));
-	phasing_pairs[0] = std::vector<int>{0};
+	phasing_pairs[0] = std::set<int>{0};
       }
       else if (params.param.contract.phases.size() > 0)
       {
@@ -345,18 +347,18 @@ namespace Chroma
 	    phasings.push_back(snk);
 	  if (phasing_pairs.count(src_idx) == 0)
 	  {
-	    phasing_pairs[src_idx] = std::vector<int>{snk_idx};
+	    phasing_pairs[src_idx] = std::set<int>{snk_idx};
 	  }
 	  else
 	  {
-	    phasing_pairs[src_idx].push_back(snk_idx);
+	    phasing_pairs[src_idx].insert(snk_idx);
 	  }
 	}
       }
       else
       {
 	phasings.push_back(SB::Coor<Nd - 1>{{}});
-	phasing_pairs[0] = std::vector<int>{0};
+	phasing_pairs[0] = std::set<int>{0};
       }
 
       // Test and grab a reference to the gauge field

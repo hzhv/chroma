@@ -11327,6 +11327,16 @@ namespace Chroma
       return Coor<3>{v[0], v[1], v[2]};
     }
 
+    /// Return a Coor<3> from a vector
+    /// \param v: input to convert
+
+    inline Coor<3> toCoor(const std::vector<int>& v)
+    {
+      if (v.size() != 3)
+	throw std::runtime_error("invalid number of elements");
+      return Coor<3>{v[0], v[1], v[2]};
+    }
+
     /// Return a multi1d from std::vector
     /// \param v: vector to convert
 

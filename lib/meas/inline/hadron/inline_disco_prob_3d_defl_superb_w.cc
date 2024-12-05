@@ -399,6 +399,7 @@ namespace Chroma
 	}
       }
 
+      MesonMap<bool> unique(16);
       for (const auto& combo : combos)
       {
 	const auto& disps = combo.displacement_list;
@@ -425,6 +426,11 @@ namespace Chroma
 	    for (int mom = 0; mom < mom_list.size(); ++mom)
 	    {
 	      MesonKey k{tfrom % Nt, norm_disps[disp_index], mom_list[mfrom + mom]};
+
+	      // Avoid adding the same mom-dist twice
+	      if (unique.count(k) > 0)
+		continue;
+	      unique.insert({k, true});
 
 	      auto it = db.find(k);
 	      if (it == db.end())

@@ -696,7 +696,7 @@ namespace Chroma
       };
 
       /// Superb storage; dimension labels ijktdm:
-      /// i,j,k: eigenvector indeces
+      /// i,j,k: eigenvector indices
       /// t: time slice
       /// d: concatenation of the left, middle and right displacements
       /// m: momentum

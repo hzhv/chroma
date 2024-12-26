@@ -187,6 +187,11 @@ namespace Chroma
       {
 	read(inputtop, "max_rhs", param.max_rhs);
       }
+
+      param.use_superb_format = true;
+      if( inputtop.count("use_superb_format") == 1 ) {
+        read(inputtop, "use_superb_format", param.use_superb_format);
+      }
     }
 
     //! Propagator output
@@ -207,6 +212,7 @@ namespace Chroma
       write(xml, "probing_power", param.probing_power);
       write(xml, "noise_vectors", param.noise_vectors);
       write(xml, "max_rhs", param.max_rhs);
+      write(xml, "use_superb_format", param.use_superb_format);
       xml << param.projParam.xml;
 
       pop(xml);
@@ -585,6 +591,125 @@ namespace Chroma
       }
     }
 
+    template <typename Vector>
+    struct Hash {
+      std::size_t operator()(const Vector& k) const
+      {
+	auto h = std::hash<int>{}(0);
+	for (const auto& it : k)
+	  h = (h << 1) ^ std::hash<typename std::remove_const<
+			   typename std::remove_reference<decltype(it)>::type>::type>{}(it);
+	return h;
+      }
+    };
+
+    void write_sdb(const Traces& db, const std::string filename, const Params::Param_t& param,
+		   const XMLBufferWriter& gauge_xml, int first_computed_color,
+		   int num_computed_colors, int num_colors, int deflation_rank,
+		   bool use_new_format = true)
+    {
+      std::unordered_map<std::vector<int>, int, Hash<std::vector<int>>> disps_map(16);
+      std::unordered_map<SB::Coor<3>, int, Hash<SB::Coor<3>>> moms_map(16);
+      const std::string order = "itdm";
+
+      // Write the meta-data
+      XMLBufferWriter metadata_xml;
+      push(metadata_xml, "DBMetaData");
+      write(metadata_xml, "id", std::string("DiscoBlocks"));
+      write(metadata_xml, "lattSize", QDP::Layout::lattSize());
+      write(metadata_xml, "decay_dir", 3);
+      write(metadata_xml, "Params", param);
+      write(metadata_xml, "Config_info", gauge_xml);
+      write(metadata_xml, "first_computed_color", first_computed_color);
+      write(metadata_xml, "num_computed_colors", num_computed_colors);
+      write(metadata_xml, "num_colors", num_colors);
+      write(metadata_xml, "deflation_rank", deflation_rank);
+      if (use_new_format)
+      {
+	write(metadata_xml, "tensorOrder", order);
+	write(metadata_xml, "mass_label", param.mass_label);
+	std::unordered_set<std::vector<int>, Hash<std::vector<int>>> disps_set(16);
+	std::unordered_set<SB::Coor<3>, Hash<SB::Coor<3>>> moms_set(16);
+	for (const auto& it : db)
+	{
+	  disps_set.insert(it.first.disp);
+	  moms_set.insert(it.first.mom);
+	}
+	int i = 0;
+	std::vector<multi1d<int>> disps;
+	for (const auto& it : disps_set)
+	{
+	  disps.push_back(SB::tomulti1d(it));
+	  disps_map[it] = i++;
+	}
+	write(metadata_xml, "displacements", disps);
+	i = 0;
+	std::vector<multi1d<int>> moms;
+	for (const auto& it : moms_set)
+	{
+	  moms.push_back(SB::tomulti1d(it));
+	  moms_map[it] = i++;
+	}
+	write(metadata_xml, "moms", moms);
+      }
+      pop(metadata_xml);
+
+      if (!use_new_format)
+      {
+	if (Layout::nodeNumber() != 0)
+	  return;
+
+	// DB storage
+	LocalBinaryStoreDB<LocalSerialDBKey<KeyOperator_t>, LocalSerialDBData<ValOperator_t>>
+	  qdp_db;
+
+	std::string file_str(metadata_xml.str());
+	qdp_db.setMaxUserInfoLen(file_str.size());
+
+	//Slightly modify code to account for changes from multifile write.
+	//Be consistent with old mode of filename write.
+	qdp_db.open(filename, O_RDWR | O_CREAT, 0664);
+
+	qdp_db.insertUserdata(file_str);
+
+	KeyOperator_t key;
+	ValOperator_t val;
+	// Store all the data
+	for (const auto& it : db)
+	{
+	  key.t_slice = it.first.t_slice;
+	  key.disp = SB::tomulti1d(it.first.disp);
+	  key.mom = SB::tomulti1d(it.first.mom);
+	  key.mass_label = param.mass_label;
+	  for (int i = 0; i < Ns * Ns; i++)
+	    val.set({i}, it.second[i]);
+	  qdp_db.insert(key, val);
+	}
+	qdp_db.close();
+      }
+      else
+      {
+      	// NOTE: metadata_xml only has a valid value on Master node; so do a broadcast
+	std::string metadata = SB::broadcast(metadata_xml.str());
+
+	const int Nt = Layout::lattSize()[3];
+	auto st = SB::StorageTensor<4, SB::ComplexD>(
+	  filename, metadata, order,
+	  SB::kvcoors<4>(
+	    order, {{'i', Ns * Ns}, {'t', Nt}, {'d', disps_map.size()}, {'m', moms_map.size()}}),
+	  SB::Sparse, SB::checksum_type::BlockChecksum, SB::SharedFSFile);
+	st.preallocate(Ns * Ns * db.size());
+	for (const auto& it : db)
+	{
+	  st.kvslice_from_size({{'t', it.first.t_slice},
+				{'m', moms_map[it.first.mom]},
+				{'d', disps_map[it.first.disp]}},
+			       {{'t', 1}, {'m', 1}, {'d', 1}})
+	    .copyFrom(SB::asTensorView(it.second));
+	}
+      }
+    }
+
     namespace
     {
       AbsInlineMeasurement* createMeasurement(XMLReader& xml_in, const std::string& path)
@@ -827,57 +952,30 @@ namespace Chroma
 	    *vk[ki] = *uk[ki] / getLambda(proj, k + ki);
 	  getU(proj, k, uk);
 
+	  // Compute the contribution of the projector for all the time slices requested by the user,
+	  // unless the user wants to store them in a file
+	  std::vector<int> t_sources = params.param.t_sources;
+	  if (params.named_obj.defl_sdb_file.size() > 0)
+	  {
+	    const int Nt = Layout::lattSize()[3];
+	    t_sources.resize(0);
+	    for (int t = 0; t < Nt; ++t)
+	      t_sources.push_back(t);
+	  }
+
 	  // Added to dbdet the results of \Omega*P*inv(A)=\Omega*V*inv(U'*A*V)*U', where \Omega are
-	  do_disco(dbdet, uk, vk, disp_mom_combos, params.param.t_sources.at(0),
-		   params.param.use_ferm_state_links ? state->getLinks() : u);
+	  for (const auto t : t_sources)
+	  {
+	    do_disco(dbdet, uk, vk, disp_mom_combos, t,
+		     params.param.use_ferm_state_links ? state->getLinks() : u);
+	  }
 	}
 
 	// write out just the contribution of the projector on the loop
-	if (Layout::nodeNumber() == 0 && params.named_obj.defl_sdb_file.size() > 0)
+	if (params.named_obj.defl_sdb_file.size() > 0)
 	{
-	  // DB storage
-	  LocalBinaryStoreDB<LocalSerialDBKey<KeyOperator_t>, LocalSerialDBData<ValOperator_t>>
-	    qdp_db;
-
-	  // Open the file, and write the meta-data and the binary for this operator
-	  XMLBufferWriter file_xml;
-
-	  push(file_xml, "DBMetaData");
-	  write(file_xml, "id", std::string("DiscoBlocks"));
-	  write(file_xml, "lattSize", QDP::Layout::lattSize());
-	  write(file_xml, "decay_dir", decay_dir);
-	  write(file_xml, "Params", params.param);
-	  write(file_xml, "Config_info", gauge_xml);
-	  write(file_xml, "first_computed_color", 0);
-	  write(file_xml, "num_computed_colors", 0);
-	  write(file_xml, "num_colors", 0);
-	  write(file_xml, "deflation_rank", rank);
-	  pop(file_xml);
-
-	  std::string file_str(file_xml.str());
-	  qdp_db.setMaxUserInfoLen(file_str.size());
-
-	  //Slightly modify code to account for changes from multifile write.
-	  //Be consistent with old mode of filename write.
-	  std::string file_name = params.named_obj.defl_sdb_file;
-	  qdp_db.open(file_name, O_RDWR | O_CREAT, 0664);
-
-	  qdp_db.insertUserdata(file_str);
-
-	  KeyOperator_t key;
-	  ValOperator_t val;
-	  // Store all the data
-	  for (const auto& it : dbdet)
-	  {
-	    key.t_slice = it.first.t_slice;
-	    key.disp = SB::tomulti1d(it.first.disp);
-	    key.mom = SB::tomulti1d(it.first.mom);
-	    key.mass_label = params.param.mass_label;
-	    for (int i = 0; i < Ns * Ns; i++)
-	      val.set({i}, it.second[i]);
-	    qdp_db.insert(key, val);
-	  }
-	  qdp_db.close();
+	  write_sdb(dbdet, params.named_obj.defl_sdb_file, params.param, gauge_xml, 0, 0, 0, rank,
+		    params.param.use_superb_format);
 	}
       }
 
@@ -1005,52 +1103,9 @@ namespace Chroma
 		  << std::endl;
 
       // write out the results
-
-      if (Layout::nodeNumber() == 0)
-      {
-	// DB storage
-	LocalBinaryStoreDB<LocalSerialDBKey<KeyOperator_t>, LocalSerialDBData<ValOperator_t>>
-	  qdp_db;
-
-	// Open the file, and write the meta-data and the binary for this operator
-	XMLBufferWriter file_xml;
-
-	push(file_xml, "DBMetaData");
-	write(file_xml, "id", std::string("DiscoBlocks"));
-	write(file_xml, "lattSize", QDP::Layout::lattSize());
-	write(file_xml, "decay_dir", decay_dir);
-	write(file_xml, "Params", params.param);
-	write(file_xml, "Config_info", gauge_xml);
-	write(file_xml, "first_computed_color", params.param.first_color);
-	write(file_xml, "num_computed_colors", std::max(0, max_color - params.param.first_color));
-	write(file_xml, "num_colors", Nsrc);
-	pop(file_xml);
-
-	std::string file_str(file_xml.str());
-	qdp_db.setMaxUserInfoLen(file_str.size());
-
-	//Slightly modify code to account for changes from multifile write.
-	//Be consistent with old mode of filename write.
-	std::string file_name = params.named_obj.sdb_file;
-	qdp_db.open(file_name, O_RDWR | O_CREAT, 0664);
-
-	qdp_db.insertUserdata(file_str);
-
-	KeyOperator_t key;
-	ValOperator_t val;
-	// Store all the data
-	for (const auto& it : dbmean)
-	{
-	  key.t_slice = it.first.t_slice;
-	  key.disp = SB::tomulti1d(it.first.disp);
-	  key.mom = SB::tomulti1d(it.first.mom);
-	  key.mass_label = params.param.mass_label;
-	  for (int i = 0; i < Ns * Ns; i++)
-	    val.set({i}, it.second[i]);
-	  qdp_db.insert(key, val);
-	}
-	qdp_db.close();
-      }
+      write_sdb(dbmean, params.named_obj.sdb_file, params.param, gauge_xml,
+		params.param.first_color, std::max(0, max_color - params.param.first_color), Nsrc,
+		0, params.param.use_superb_format);
 
       pop(xml_out); // close last tag
 

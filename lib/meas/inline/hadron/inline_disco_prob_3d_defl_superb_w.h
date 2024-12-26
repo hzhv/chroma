@@ -64,6 +64,7 @@ namespace Chroma
 	int num_colors;
 	int noise_vectors;
 	bool use_ferm_state_links ;
+	bool use_superb_format;  /*!< Whether use the superb format for storing the elementals */
       } param;
 
       struct NamedObject_t

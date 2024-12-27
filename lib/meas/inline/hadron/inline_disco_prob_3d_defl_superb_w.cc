@@ -206,6 +206,11 @@ namespace Chroma
       {
 	param.link_smearing = readXMLGroup(inputtop, "LinkSmearing", "LinkSmearingType");
       }
+
+      param.max_tslices_in_contraction = 1;
+      if( inputtop.count("max_tslices_in_contraction") == 1 ) {
+        read(inputtop, "max_tslices_in_contraction", param.max_tslices_in_contraction);
+      }
     }
 
     //! Propagator output
@@ -383,7 +388,7 @@ namespace Chroma
     void do_disco(Traces& db, const std::vector<std::shared_ptr<LatticeFermion>>& qbar,
 		  const std::vector<std::shared_ptr<LatticeFermion>>& q,
 		  const std::vector<combo_t>& combos, int t_source,
-		  const multi1d<LatticeColorMatrix>& u)
+		  const multi1d<LatticeColorMatrix>& u, int max_tslices = 0)
     {
 
       const int Nt = Layout::lattSize()[3];
@@ -475,7 +480,7 @@ namespace Chroma
 	};
 	SB::doMomGammaDisp_contractions<8, Nd + 6, Nd + 6, SB::Complex>(
 	  u, qbart, qt, t0 /* first t_slize */, 0 /* save from */, tn /* save size */, mom_list,
-	  gamma_mats, disps, false /*no deriv*/, call, order_out);
+	  gamma_mats, disps, false /*no deriv*/, call, order_out, t_source >= 0 ? 1 : max_tslices);
       }
     }
 
@@ -980,7 +985,8 @@ namespace Chroma
 	  // Added to dbdet the results of \Omega*P*inv(A)=\Omega*V*inv(U'*A*V)*U', where \Omega are
 	  // local operators in spin and space
 	  do_disco(dbdet, uk, vk, disp_mom_combos, t_sources,
-		   params.param.use_ferm_state_links ? state->getLinks() : u);
+		   params.param.use_ferm_state_links ? state->getLinks() : u,
+		   params.param.max_tslices_in_contraction);
 	}
 
 	// write out just the contribution of the projector on the loop

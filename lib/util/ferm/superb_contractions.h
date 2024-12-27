@@ -5390,10 +5390,11 @@ namespace Chroma
     }
 
     template <typename COMPLEX>
-    Tensor<1, COMPLEX> asTensorView(std::vector<COMPLEX>& v,
+    Tensor<1, COMPLEX> asTensorView(const std::vector<COMPLEX>& v,
 				    Distribution dist = OnEveryoneReplicated)
     {
-      return Tensor<1, COMPLEX>("i", Coor<1>{Index(v.size())}, OnHost, dist, v.data());
+      return Tensor<1, COMPLEX>("i", Coor<1>{Index(v.size())}, OnHost, dist,
+				const_cast<COMPLEX*>(v.data()));
     }
 
     inline Tensor<2, Complex> asTensorView(SpinMatrix& smat,

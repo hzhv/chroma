@@ -389,25 +389,27 @@ namespace Chroma
       const int Nt = Layout::lattSize()[3];
       const int a = qbar.size();
       assert(qbar.size() == q.size());
+      const int t0 = (t_source >= 0 ? t_source : 0);
+      const int tn = (t_source >= 0 ? 1 : Nt);
 
       // Copy q and qbar to tensor forms
       std::string q_order = "cxyzXnSst*";
       SB::Tensor<Nd + 6, SB::Complex> qt(
 	q_order,
-	SB::latticeSize<Nd + 6>(q_order, {{'t', 1}, {'n', 1}, {'S', Ns}, {'s', 1}, {'*', a}}));
+	SB::latticeSize<Nd + 6>(q_order, {{'t', tn}, {'n', 1}, {'S', Ns}, {'s', 1}, {'*', a}}));
       for (int i = 0; i < a; ++i)
 	SB::asTensorView(*q[i])
 	  .rename_dims({{'s', 'S'}})
-	  .kvslice_from_size({{'t', t_source}}, {{'t', 1}})
+	  .kvslice_from_size({{'t', t0}}, {{'t', tn}})
 	  .copyTo(qt.kvslice_from_size({{'*', i}}, {{'*', 1}}));
       std::string qbar_order = "cxyzXNQqt*";
       SB::Tensor<Nd + 6, SB::Complex> qbart(
 	qbar_order,
-	SB::latticeSize<Nd + 6>(qbar_order, {{'t', 1}, {'N', 1}, {'Q', Ns}, {'q', 1}, {'*', a}}));
+	SB::latticeSize<Nd + 6>(qbar_order, {{'t', tn}, {'N', 1}, {'Q', Ns}, {'q', 1}, {'*', a}}));
       for (int i = 0; i < a; ++i)
 	SB::asTensorView(*qbar[i])
 	  .rename_dims({{'s', 'Q'}})
-	  .kvslice_from_size({{'t', t_source}}, {{'t', 1}})
+	  .kvslice_from_size({{'t', t0}}, {{'t', tn}})
 	  .copyTo(qbart.kvslice_from_size({{'*', i}}, {{'*', 1}}));
 
       // Put all gamma matrices in a single tensor
@@ -442,34 +444,38 @@ namespace Chroma
 	  // Do the update only on the master node
 	  if (con)
 	  {
-	    if (r.kvdim().at('t') != 1)
+	    int tsize = r.kvdim().at('t');
+	    if (tn == 1 && tsize != 1)
 	      throw std::runtime_error("wtf");
 	    for (int mom = 0; mom < mom_list.size(); ++mom)
 	    {
-	      MesonKey k{tfrom % Nt, norm_disps[disp_index], mom_list[mfrom + mom]};
-
-	      // Avoid adding the same mom-dist twice
-	      if (unique.count(k) > 0)
-		continue;
-	      unique.insert({k, true});
-
-	      auto it = db.find(k);
-	      if (it == db.end())
-		it = db.insert({k, std::vector<std::complex<double>>(Ns * Ns)}).first;
-
-	      for (int ai = 0; ai < a; ++ai)
+	      for (int t = 0; t < tsize; ++t)
 	      {
-		for (int g = 0; g < Ns * Ns; ++g)
+		MesonKey k{(tfrom + t) % Nt, norm_disps[disp_index], mom_list[mfrom + mom]};
+
+		// Avoid adding the same mom-dist twice
+		if (unique.count(k) > 0)
+		  continue;
+		unique.insert({k, true});
+
+		auto it = db.find(k);
+		if (it == db.end())
+		  it = db.insert({k, std::vector<std::complex<double>>(Ns * Ns)}).first;
+
+		for (int ai = 0; ai < a; ++ai)
 		{
-		  it->second[g] += con.get({g, mom, 1, 1, 1, 1, 0, ai});
+		  for (int g = 0; g < Ns * Ns; ++g)
+		  {
+		    it->second[g] += con.get({g, mom, 1, 1, 1, 1, 0, ai});
+		  }
 		}
 	      }
 	    }
 	  }
 	};
 	SB::doMomGammaDisp_contractions<8, Nd + 6, Nd + 6, SB::Complex>(
-	  u, qbart, qt, t_source /* first t_slize */, 0 /* save from */, 1 /* save size */,
-	  mom_list, gamma_mats, disps, false /*no deriv*/, call, order_out);
+	  u, qbart, qt, t0 /* first t_slize */, 0 /* save from */, tn /* save size */, mom_list,
+	  gamma_mats, disps, false /*no deriv*/, call, order_out);
       }
     }
 
@@ -969,21 +975,12 @@ namespace Chroma
 
 	  // Compute the contribution of the projector for all the time slices requested by the user,
 	  // unless the user wants to store them in a file
-	  std::vector<int> t_sources = params.param.t_sources;
-	  if (params.named_obj.defl_sdb_file.size() > 0)
-	  {
-	    const int Nt = Layout::lattSize()[3];
-	    t_sources.resize(0);
-	    for (int t = 0; t < Nt; ++t)
-	      t_sources.push_back(t);
-	  }
+	  const int t_sources = params.named_obj.defl_sdb_file.size() > 0 ? -1 : params.param.t_sources.at(0);
 
 	  // Added to dbdet the results of \Omega*P*inv(A)=\Omega*V*inv(U'*A*V)*U', where \Omega are
-	  for (const auto t : t_sources)
-	  {
-	    do_disco(dbdet, uk, vk, disp_mom_combos, t,
-		     params.param.use_ferm_state_links ? state->getLinks() : u);
-	  }
+	  // local operators in spin and space
+	  do_disco(dbdet, uk, vk, disp_mom_combos, t_sources,
+		   params.param.use_ferm_state_links ? state->getLinks() : u);
 	}
 
 	// write out just the contribution of the projector on the loop

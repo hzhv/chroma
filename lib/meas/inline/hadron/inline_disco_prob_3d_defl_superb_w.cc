@@ -68,6 +68,8 @@ namespace Chroma
       read(inputtop, "sdb_file", input.sdb_file);
       if (inputtop.count("defl_sdb_file") == 1)
 	read(inputtop, "defl_sdb_file", input.defl_sdb_file);
+      if (inputtop.count("ip_sdb_file") == 1)
+	read(inputtop, "ip_sdb_file", input.ip_sdb_file);
     }
 
     //! Propagator output
@@ -79,6 +81,7 @@ namespace Chroma
       write(xml, "gauge_id", input.gauge_id);
       write(xml, "sdb_file", input.sdb_file);
       write(xml, "delf_sdb_file", input.defl_sdb_file);
+      write(xml, "ip_sdb_file", input.ip_sdb_file);
 
       pop(xml);
     }
@@ -192,6 +195,17 @@ namespace Chroma
       if( inputtop.count("use_superb_format") == 1 ) {
         read(inputtop, "use_superb_format", param.use_superb_format);
       }
+
+      param.num_vecs = 0;
+      if (inputtop.count("num_vecs") == 1)
+      {
+	read(inputtop, "num_vecs", param.num_vecs);
+      }
+
+      if (inputtop.count("LinkSmearing") == 1)
+      {
+	param.link_smearing = readXMLGroup(inputtop, "LinkSmearing", "LinkSmearingType");
+      }
     }
 
     //! Propagator output
@@ -214,6 +228,7 @@ namespace Chroma
       write(xml, "max_rhs", param.max_rhs);
       write(xml, "use_superb_format", param.use_superb_format);
       xml << param.projParam.xml;
+      xml << param.link_smearing.xml;
 
       pop(xml);
     }
@@ -976,6 +991,77 @@ namespace Chroma
 	{
 	  write_sdb(dbdet, params.named_obj.defl_sdb_file, params.param, gauge_xml, 0, 0, 0, rank,
 		    params.param.use_superb_format);
+	}
+
+	const int n_colorvecs = params.param.num_vecs;
+	if (params.named_obj.ip_sdb_file.size() > 0 && n_colorvecs > 0)
+	{
+	  // Smear the gauge field if needed
+	  multi1d<LatticeColorMatrix> u_smr = u;
+	  try
+	  {
+	    std::istringstream xml_l(params.param.link_smearing.xml);
+	    XMLReader linktop(xml_l);
+	    Handle<LinkSmearing> linkSmearing(TheLinkSmearingFactory::Instance().createObject(
+	      params.param.link_smearing.id, linktop, params.param.link_smearing.path));
+	    (*linkSmearing)(u_smr);
+	  } catch (const std::string& e)
+	  {
+	    QDPIO::cerr << ": Caught Exception link smearing: " << e << std::endl;
+	    QDP_abort(1);
+	  } catch (...)
+	  {
+	    QDPIO::cerr << ": Caught unexpected exception" << std::endl;
+	    QDP_abort(1);
+	  }
+
+	  // Compute colorvecs
+	  const int Nt = Layout::lattSize()[3];
+	  const int N_rhs = std::max(params.param.max_rhs, 1);
+	  std::vector<std::shared_ptr<LatticeFermion>> chis(N_rhs), sols(N_rhs);
+	  for (int col = 0; col < N_rhs; col++)
+	    chis[col].reset(new LatticeFermion);
+	  for (int col = 0; col < N_rhs; col++)
+	    sols[col].reset(new LatticeFermion);
+	  std::vector<double> ip(Ns * n_colorvecs, -1.0);
+	  for (int t = 0; t < Nt; ++t)
+	  {
+	    std::string order = "cxyzXtn";
+	    auto colorvecs =
+	      SB::ns_getColorvecs::computeColorvecs(u_smr, t, 1, n_colorvecs, order).first;
+	    for (int s = 0; s < Ns; ++s)
+	    {
+	      for (int i0 = 0, nvecs = std::min(N_rhs, n_colorvecs); i0 < n_colorvecs;
+		   i0 += nvecs, nvecs = std::min(N_rhs, n_colorvecs - i0))
+	      {
+		for (int i = i0, col = 0; col < nvecs; ++i, ++col)
+		{
+		  // chis[col][s] = colorvec[n=i]
+		  *chis[col] = zero;
+		  colorvecs.kvslice_from_size({{'n', i}}, {{'n', 1}})
+		    .copyTo(SB::asTensorView(*chis[col]).kvslice_from_size({{'t', t}, {'s', s}}));
+		  *sols[col] = zero;
+		}
+
+		std::vector<std::shared_ptr<LatticeFermion>> out(sols.begin(), sols.begin() + nvecs);
+		doVUAObliqueProjector(proj, out,
+				      std::vector<std::shared_ptr<const LatticeFermion>>(
+					chis.begin(), chis.begin() + nvecs));
+		for (int i = i0, col = 0; col < nvecs; ++i, ++col)
+		{
+		  ip[s + i * Ns] = SB::fnorm(SB::asTensorView(*sols[col]));
+		}
+	      }
+	    }
+	  }
+
+	  if (Layout::nodeNumber() == 0)
+	  {
+	    std::ofstream of(params.named_obj.ip_sdb_file);
+	    of << std::setprecision(15);
+	    for (const auto it : ip)
+	      of << it << std::endl;
+	  }
 	}
       }
 

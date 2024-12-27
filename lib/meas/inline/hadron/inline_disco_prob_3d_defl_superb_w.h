@@ -65,6 +65,8 @@ namespace Chroma
 	int noise_vectors;
 	bool use_ferm_state_links ;
 	bool use_superb_format;  /*!< Whether use the superb format for storing the elementals */
+	int num_vecs;
+        GroupXML_t link_smearing;
       } param;
 
       struct NamedObject_t
@@ -72,6 +74,7 @@ namespace Chroma
 	std::string     gauge_id;    /*!< Gauge field */
 	std::string     sdb_file;    /*!< the db file to store loops */
 	std::string     defl_sdb_file;    /*!< the db file to store the deterministic part of the loops */
+	std::string     ip_sdb_file;    /*!< the db file to store the angles between the projector and distillation basis */
       } named_obj;
 
       std::string xml_file;  // Alternate XML file pattern

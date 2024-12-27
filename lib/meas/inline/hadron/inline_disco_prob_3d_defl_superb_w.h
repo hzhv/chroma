@@ -66,6 +66,7 @@ namespace Chroma
 	bool use_ferm_state_links ;
 	bool use_superb_format;  /*!< Whether use the superb format for storing the elementals */
 	int num_vecs;
+	int                       max_tslices_in_contraction;  /*! maximum number of contracted tslices simultaneously */
         GroupXML_t link_smearing;
       } param;
 

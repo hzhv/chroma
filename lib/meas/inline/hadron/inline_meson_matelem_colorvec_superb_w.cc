@@ -49,7 +49,7 @@ namespace Chroma
 	read(paramtop, "mom_list", param.mom_list);
 
       param.mom2_min = 0;
-      if (paramtop.count("mom_min") > 0)
+      if (paramtop.count("mom2_min") > 0)
 	read(paramtop, "mom2_min", param.mom2_min);
 
       param.mom2_max = 0;

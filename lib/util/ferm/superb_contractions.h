@@ -4966,12 +4966,13 @@ namespace Chroma
 	return 0;
 
       // Extend the first dimension
-      const char label = v.order[0];
-      char new_label = detail::get_free_label(v.order);
-      auto x = v.split_dimension(label, std::string{label, new_label}, v.kvdim().at(label));
+      const auto v0 = v.toComplex();
+      const char label = v0.order[0];
+      char new_label = detail::get_free_label(v0.order);
+      auto x = v0.split_dimension(label, std::string{label, new_label}, v0.kvdim().at(label));
 
       // Contract the tensor on all labels excepting the new one; the result should be a single number
-      auto r = contract<1>(x.conj(), x, v.order, OnHost,
+      auto r = contract<1>(x.conj(), x, v0.order, OnHost,
 			   detail::compatible_replicated_distribution(x.dist));
       if (r.volume() != 1)
 	throw std::runtime_error("wtf");

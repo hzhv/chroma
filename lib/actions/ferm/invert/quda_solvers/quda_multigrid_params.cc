@@ -1,48 +1,24 @@
 #include "chromabase.h"
 #include <string>
 #include "actions/ferm/invert/quda_solvers/quda_multigrid_params.h"
+#include "actions/ferm/invert/quda_solvers/xml_array_utils.h"
 
 using namespace QDP;
 
 namespace Chroma {
 
-	template<typename T>
-	void readArray(XMLReader& paramtop, const std::string& path, multi1d<T>& array, const T& defValue)
-	{
+  void read(XMLReader& xml_in, const std::string& path, MGEig& p) {
+    XMLReader paramtop(xml_in, path);
+    read(paramtop, "Level", p.level);
+    read(paramtop, "MGEigParam", p.eig_p);
+  }
 
-		multi1d<T> tmp;
-		// If path is not found use default
-		if ( paramtop.count(path) == 0 ) {
-
-			QDPIO::cout << "Parameter with " << path << " not found. Setting default value "
-					<< defValue <<  " for " << array.size() << " array members" << std::endl;
-
-			for(int l=0; l < array.size() ; ++l) array[l] = defValue;
-		}
-		else {
-
-			// If it is found read it to tmp
-			read(paramtop, path, tmp);
-			if ( tmp.size() == 1 ) {
-                QDPIO::cout << "Broadcasting " << path << " = " << tmp[0] << "  to "  << array.size() <<  " array members" << std::endl;
-				// if tmp is a single element array, broadcast it
-				for(int l=0; l < array.size(); ++l) array[l] = tmp[0];
-			}
-			else {
-
-				// If tmp is the same size as array copy it
-				QDPIO::cout << "Copying " << path << " values to " << array.size() << " members " << std::endl;
-				if ( tmp.size() == array.size() ) {
-					for(int l=0; l < array.size(); ++l) array[l] = tmp[l];
-				}
-				else {
-					QDPIO::cout << "Error: Array with path " << path << "has size "
-							<< tmp.size() << " but " << array.size() << " are expected. " << std::endl;
-					QDP_abort(1);
-				}
-			}
-		}
-	}
+  void write(XMLWriter& xml, const std::string& path, const MGEig& p) {
+    push(xml, path);
+    write(xml, "Level", p.level);
+    write(xml, "MGEigParam", p.eig_p);
+    pop(xml);
+  }
 
   MULTIGRIDSolverParams::MULTIGRIDSolverParams(XMLReader& xml, 
 					     const std::string& path)
@@ -255,7 +231,27 @@ namespace Chroma {
         setup_on_gpu[l] = true;
       }
     }
-    
+
+    if( paramtop.count("MgEigDeflation") == 1 ) {
+      try {
+        read(paramtop, "MgEigDeflation", mg_eig_params );
+      }
+      catch(const std::string& e) {
+        QDPIO::cout << "Caught Exception " << e << "\n";
+        QDP_abort(-1);
+      }
+      catch(std::exception &e) {
+               QDPIO::cout << "Caught Exception " << e.what() << "\n";
+        QDP_abort(-1); 
+      }
+      catch(...) {
+        QDPIO::cout << "Caught unknown exception...." << "\n";
+      }
+     got_mg_eig_params = true;
+    }
+    else {
+      got_mg_eig_params = false;
+    }
   }
 
   void read(XMLReader& xml, const std::string& path, 
@@ -299,6 +295,9 @@ namespace Chroma {
     write(xml, "MaxIterSubspaceRefresh", p.maxIterSubspaceRefresh);
     write(xml, "RsdTargetSubspaceCreate", p.rsdTargetSubspaceCreate);
     write(xml, "SetupOnGPU", p.setup_on_gpu);
+    if( p.got_mg_eig_params ) {
+      write(xml, "MgEigDeflation", p.mg_eig_params);
+    }
     pop(xml);
 
   }

@@ -1957,6 +1957,7 @@ if( Chroma_ENABLE_QUDA )
 	actions/ferm/invert/quda_solvers/quda_gcr_params.h
 	actions/ferm/invert/quda_solvers/quda_multigrid_params.h
 	actions/ferm/invert/quda_solvers/qdpjit_memory_wrapper.h
+	actions/ferm/invert/quda_solvers/quda_eig_params.h
 	meas/inline/io/inline_erase_quda_multigrid_space.h
 	update/molecdyn/predictor/quda_predictor.h
 )
@@ -1982,6 +1983,7 @@ target_sources(chromalib PRIVATE
 	actions/ferm/invert/quda_solvers/syssolver_mdagm_wilson_quda_w.cc
 	actions/ferm/invert/quda_solvers/multi_syssolver_mdagm_cg_clover_quda_w.cc
 	actions/ferm/invert/quda_solvers/multi_syssolver_mdagm_cg_wilson_quda_w.cc
+	actions/ferm/invert/quda_solvers/quda_eig_params.cc
 	meas/inline/io/inline_erase_quda_multigrid_space.cc
 	update/molecdyn/predictor/quda_predictor.cc
 )

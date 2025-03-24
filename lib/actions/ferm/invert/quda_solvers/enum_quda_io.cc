@@ -142,19 +142,19 @@ namespace Chroma {
 			bool success = true;
 
 			// Thick Restarted Lanczos
-			success = theQudaEigTypeMap::Instance().registerPair(string("TR_LANCZOS"), 
+			success = theQudaEigTypeMap::Instance().registerPair(std::string("TR_LANCZOS"), 
 																																	QUDA_EIG_TR_LANCZOS);
 
 		  // Block Thick Restarted Lanczos
-			success &= theQudaEigTypeMap::Instance().registerPair(string("BLK_TR_LANCZOS"), 
+			success &= theQudaEigTypeMap::Instance().registerPair(std::string("BLK_TR_LANCZOS"), 
 																																	QUDA_EIG_BLK_TR_LANCZOS);
 
 			// Implicitly Restarted Arnoldi
-			success &= theQudaEigTypeMap::Instance().registerPair(string("IR_ARNOLDI"), 
+			success &= theQudaEigTypeMap::Instance().registerPair(std::string("IR_ARNOLDI"), 
 																																	QUDA_EIG_IR_ARNOLDI);
 
 			// Block Implicitly Restarted Arnoldi
-			success &= theQudaEigTypeMap::Instance().registerPair(string("BLK_IR_ARNOLDI"), 
+			success &= theQudaEigTypeMap::Instance().registerPair(std::string("BLK_IR_ARNOLDI"), 
 																																	QUDA_EIG_BLK_IR_ARNOLDI);
 			return success;
 		}

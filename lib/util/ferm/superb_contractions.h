@@ -3541,7 +3541,7 @@ namespace Chroma
       bool is_distributed_like(Tensor<N, Tv> v) const
       {
 	return order == v.order && from == v.from && size == v.size && dim == v.dim &&
-	       p->p == v.p->p;
+	       p->p == v.p->p && getDev() == v.getDev();
       }
 
       /// Return whether the given tensor has the same distribution as this one

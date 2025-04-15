@@ -336,7 +336,8 @@ namespace Chroma
 	for (const auto phasing_pair : params.param.contract.phases)
 	{
 	  auto src = SB::toCoor(phasing_pair.src);
-	  auto snk = SB::toCoor(phasing_pair.snk);
+	  auto snk_neg = SB::toCoor(phasing_pair.snk);
+	  auto snk = SB::Coor<3>{-snk_neg[0], -snk_neg[1], -snk_neg[2]};
 	  int src_idx =
 	    std::find(phasings.begin(), phasings.end(), src) - phasings.begin();
 	  if (src_idx == phasings.size())

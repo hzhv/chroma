@@ -1073,6 +1073,7 @@ namespace Chroma
 		  << " secs" << std::endl;
 
       const int N_rhs = (std::max(params.param.max_rhs, 1) + Ns * Nc - 1) / Ns / Nc;
+      const int N_inv_rhs = std::max(params.param.max_rhs, 1);
       const int max_color = params.param.num_colors < 0
 			      ? Nsrc
 			      : std::min(Nsrc, params.param.first_color + params.param.num_colors);
@@ -1147,9 +1148,16 @@ namespace Chroma
 	    }
 	  }
 
-	  SB::doInversion(
-	    PP, v_psi,
-	    std::vector<std::shared_ptr<const LatticeFermion>>(v_chi.begin(), v_chi.end()));
+	  for (int i0 = 0, in = std::min((int)v_chi.size(), N_inv_rhs); i0 < v_chi.size();
+	       i0 += in, in = std::min((int)v_chi.size() - i0, N_inv_rhs))
+	  {
+	    auto v_psi_i = std::vector<std::shared_ptr<LatticeFermion>>(v_psi.begin() + i0,
+									v_psi.begin() + i0 + in);
+	    auto v_chi_i = std::vector<std::shared_ptr<const LatticeFermion>>(
+	      v_chi.begin() + i0, v_chi.begin() + i0 + in);
+	    SB::doInversion(PP, v_psi_i, v_chi_i);
+	  }
+
 	  doVUAObliqueProjector(
 	    proj, v_prj,
 	    std::vector<std::shared_ptr<const LatticeFermion>>(v_psi.begin(), v_psi.end()));

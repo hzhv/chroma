@@ -534,7 +534,7 @@ namespace Chroma
 	    std::fabs((int)params.param.aQuarkPhase[i] - params.param.aQuarkPhase[i]) > 0)
 	  std::runtime_error("phase', `quarkPhase', and `aQuarkPhase' should be integer");
 	rightphase[i] = params.param.quarkPhase[i];
-	leftphase[i] = params.param.aQuarkPhase[i];
+	leftphase[i] = -params.param.aQuarkPhase[i];
       }
       std::vector<SB::Coor<3>> phasings;	     ///< list of all phasings
       phasings.push_back(leftphase);

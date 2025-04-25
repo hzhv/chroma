@@ -620,6 +620,21 @@ namespace Chroma
 	return vol;
       }
 
+      /// Return the volume associated to an order
+      /// \param m: size of each dimension
+      /// \param labels: labels to consider
+
+      template <std::size_t N>
+      inline std::map<char, int> to_kv(const std::string& labels, const Coor<N>& coors)
+      {
+	if (labels.size() != coors.size())
+	  throw std::runtime_error("to_kv: incompatible dimensions");
+	std::map<char, int> r;
+	for (std::size_t i = 0; i < N; ++i)
+	  r[labels[i]] = coors[i];
+	return r;
+      }
+
       enum CoorType { From, Size };
 
       /// Return whether two from-size ranges are compatible on common dimensions
@@ -1374,6 +1389,20 @@ namespace Chroma
 			  : std::array<Coor<N>, 2>{normalize_coor(lfrom - from, dim), lsize});
 	  }
 	  return TensorPartition<N>{size, r, isLocal};
+	}
+
+	/// Return a list of ranges unique to the local partition
+
+	PartitionStored get_unique_fragments() const
+	{
+	  int this_rank = MpiProcRank();
+	  typename TensorPartition<N>::PartitionStored r(1);
+	  r[0] = p[MpiProcRank()];
+	  for (int rank = 0; rank < this_rank; ++rank)
+	  {
+	    r = superbblas::detail::intersection(r, p[rank][0], p[rank][1], dim);
+	  }
+	  return r;
 	}
 
 	/// Return a partition with the local portion of the tensor
@@ -7177,7 +7206,7 @@ namespace Chroma
       template <std::size_t Nw, typename Tw,
 		typename std::enable_if<
 		  detail::is_complex<T>::value == detail::is_complex<Tw>::value, bool>::type = true>
-      void copyFrom(const Tensor<Nw, Tw>& w) const
+      void copyFrom(const Tensor<Nw, Tw>& w, bool direct = false) const
       {
 	Coor<N> wsize = kvcoors<N>(order, w.kvdim(), 1, NoThrow);
 	for (unsigned int i = 0; i < N; ++i)
@@ -7186,6 +7215,19 @@ namespace Chroma
 
 	if (detail::is_distribution_local(w.dist) && filesystem_type != LocalFSFile)
 	  throw std::runtime_error("A local tensor cannot be stored on a global tensor storage");
+
+	// Avoid saving ranges of the local support of the tensor that are also on other processes
+	if (filesystem_type == LocalFSFile && w.dist != Local && w.dist != Glocal &&
+	    sparsity == Sparse && !direct)
+	{
+	  // Get the unique ranges of this tensor on this proc
+	  for (const auto& range : w.p->get_unique_fragments())
+	  {
+	    kvslice_from_size(detail::to_kv(w.order, range[0]), detail::to_kv(w.order, range[1]))
+	      .copyFrom(w.slice_from_size(range[0], range[1]), true);
+	  }
+	  return;
+	}
 
 	MPI_Comm comm = filesystem_type == SharedFSFile ? MPI_COMM_WORLD : MPI_COMM_SELF;
 	auto w0 = w;

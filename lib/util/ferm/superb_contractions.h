@@ -1400,7 +1400,11 @@ namespace Chroma
 	  r[0] = p[MpiProcRank()];
 	  for (int rank = 0; rank < this_rank; ++rank)
 	  {
-	    r = superbblas::detail::intersection(r, p[rank][0], p[rank][1], dim);
+	    for (const auto& fs :
+		 superbblas::make_hole(Coor<N>{{}}, dim, p[rank][0], p[rank][1], dim))
+	    {
+	      r = superbblas::detail::intersection(r, fs[0], fs[1], dim);
+	    }
 	  }
 	  return r;
 	}

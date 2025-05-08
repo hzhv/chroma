@@ -134,9 +134,9 @@ namespace Chroma
     {
       push(xml, path);
 
-      // In version 3, the antiquark phase was applied to the eigenvector before the dagger
-      // while in version 4+, the antiquark phase is applied to daggered eigenvector
-      int version = 4;
+      // In version <= 4, the antiquark phase was applied to the eigenvector before the dagger
+      // while in version >= 5, the antiquark phase is applied to daggered eigenvector
+      int version = 5;
 
       write(xml, "version", version);
       write(xml, "use_derivP", param.use_derivP);

@@ -1958,6 +1958,7 @@ if( Chroma_ENABLE_QUDA )
 	actions/ferm/invert/quda_solvers/quda_multigrid_params.h
 	actions/ferm/invert/quda_solvers/qdpjit_memory_wrapper.h
 	actions/ferm/invert/quda_solvers/quda_eig_params.h
+	actions/ferm/invert/quda_solvers/xml_array_utils.h
 	meas/inline/io/inline_erase_quda_multigrid_space.h
 	update/molecdyn/predictor/quda_predictor.h
 )

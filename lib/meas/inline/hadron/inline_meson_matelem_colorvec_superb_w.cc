@@ -639,7 +639,7 @@ namespace Chroma
 	      {
 		for (int m = 0, numm = tensor.kvdim()['m']; m < numm; ++m)
 		{
-		  key.t_slice = first_tslice + t;
+		  key.t_slice = (first_tslice + t) % Nt;
 		  key.mom = SB::tomulti1d(mom_list[first_mom + m]);
 		  key.displacement =
 		    SB::tomulti1d(displacement_list[disp]); // only right colorstd::vector

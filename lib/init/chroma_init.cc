@@ -321,6 +321,18 @@ namespace Chroma
     int gpu_device = SB::detail::getGpuContext()->device;
 
 #  ifdef BUILD_QUDA
+    QDPIO::cout << "Calling initCommsGridQuda\n";
+#    ifdef ARCH_PARSCALAR
+    int ndim = QMP_get_logical_number_of_dimensions();
+    const int* dims = QMP_get_logical_dimensions();
+#    else
+    int ndim = 4;
+    const int dims[4] = {1, 1, 1, 1};
+#    endif
+    QDPIO::cout << "calling initCommsGridQuda with ndim = " << ndim << " and geom=( " << dims[0]
+		<< ", " << dims[1] << ", " << dims[2] << ", " << dims[3] << " )\n";
+    initCommsGridQuda(ndim, dims, nullptr, nullptr);
+
     setVerbosityQuda(QUDA_SUMMARIZE, "", stdout);
     QDPIO::cout << "Initializing QUDA device (using CUDA device no. " << gpu_device << ")"
 		<< std::endl;

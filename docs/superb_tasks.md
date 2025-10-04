@@ -4,13 +4,13 @@
 
 The following tasks related with distillation are available in Chroma when compiling with superbblas' support. An easy way to compile chroma with superbblas support is with [chromaform] (https://github.com/eromero-vlc/chromaform):
 
-	git clone https://github.com/eromero-vlc/chromaform
-	cd chromaform
-	chromaform --mg --superb chroma # install chroma with superbblas support for CPU
-	chromaform --mg --superb-next chroma # install chroma with superbblas and mgproton support 
-	chromaform --mg --superb --cuda chroma # install chroma with superbblas support for CUDA
-	chromaform --mg --superb --hip chroma # install chroma with superbblas support for AMD GPUs
-	
+        git clone https://github.com/eromero-vlc/chromaform
+        cd chromaform
+        chromaform --mg --superb chroma # install chroma with superbblas support for CPU
+        chromaform --mg --superb-next chroma # install chroma with superbblas and mgproton support 
+        chromaform --mg --superb --cuda chroma # install chroma with superbblas support for CUDA
+        chromaform --mg --superb --hip chroma # install chroma with superbblas support for AMD GPUs
+        
 ## Creation of the distillation basis
 
 Example:
@@ -227,6 +227,23 @@ Example:
             <elem>0 0 3</elem>
             <elem>0 0 -3</elem>
           </mom_list>
+          <!-- optional tag: phase -->
+          <phase>0 0 2</phase>
+          <!-- optional tag: phases -->
+          <phases>
+            <elem>0 0 0</elem>
+            <elem>0 0 2</elem>
+          </phases>
+          <!-- optional tag: combos -->
+          <combos>
+            <elem>
+              <phase>2 0 0</phase>
+              <mom_list>
+                <elem>4 0 0</elem>
+                <elem>-4 0 0</elem>
+              </elem>
+            </elem>
+          </combos>
           <decay_dir>3</decay_dir>
           <use_derivP>true</use_derivP>
           <displacement_list>
@@ -375,6 +392,8 @@ Main options:
 * `Param/Nt_forward`: (ignored if `t_slices` is given, default number of time slices) number of time slices to compute starting from `t_source`.
 * `Param/t_slices`: (optional, default all time slices) list of time slices to compute.
 * `Param/phase`: (optional, default `0 0 0`) spatial phasing on the eigenvectors.
+* `Param/phases`: (optional, default empty) list of spatial phasing on the eigenvectors.
+* `Param/combos`: (optional, default empty) list pairs momenta and spatial phasing on the eigenvectors.
 * `Param/max_tslices_in_contraction`: (optional, default all of them) maximum number of time slices to contract at once.
 * `Param/max_moms_in_contraction`: (optional, default all momenta) maximum number of momenta to contract at once.
 * `Param/max_vecs`: (optional, default all eigenvectors) maximum number of eigenvectors to contract at once.

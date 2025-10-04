@@ -6916,6 +6916,20 @@ namespace Chroma
 	detail::log(1, ss.str());
       }
 
+      //void store(const std::string& name) const
+      //{
+      //  if (kron)
+      //    throw std::runtime_error("store: unsupported kron operators");
+      //  const auto& metadata = "<info>" + repr() + "</info>";
+      //  auto sto = StorageTensor<NI + ND, T>(filename, metadata, i.order + j.order,
+      //  				     detail::concat(i.size, j.size), Sparse);
+
+      //  // Get the coordinates for all nonzeros
+      //  auto ii_host = ii.make_sure(none, OnHost, OnEveryoneReplicated);
+      //  auto jj_host = jj.make_sure(none, OnHost, OnEveryoneReplicated);
+      //  auto blks = 
+      //}
+
       /// Return a copy of the tensor in a different precision
       ///
       /// \tparam Q: new precision

@@ -751,6 +751,12 @@ namespace Chroma
 	}
       };
 
+      if (!params.param.use_superb_format && phase_moms_combos.size() > 1)
+      {
+	throw std::runtime_error("unsupported to write multiple phasings on the same file with the "
+				 "old file format: set the xml tag use_superb_format to true");
+      }
+
       /// Superb storage; dimension labels ijktdm:
       /// i,j,k: eigenvector indices
       /// t: time slice
@@ -782,10 +788,10 @@ namespace Chroma
 	for (const auto& mom : unique_moms)
 	  moms.push_back(SB::tomulti1d(mom));
 	write(metadata_xml, "moms", moms);
-	std::vector<multi1d<int>> phasings_xml;
+	std::vector<multi1d<int>> phasings;
 	for (const auto& it : unique_phases)
-	  phasings_xml.push_back(SB::tomulti1d(it));
-	write(metadata_xml, "phasings", phasings_xml);
+	  phasings.push_back(SB::tomulti1d(it));
+	write(metadata_xml, "phasings", phasings);
 
 	// Some tasks read the eigenvalues from metadata but they not used; so we are going to give fake values
 	multi1d<multi1d<double>> evals(params.param.num_vecs);

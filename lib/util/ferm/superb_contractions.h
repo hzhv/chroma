@@ -10475,12 +10475,13 @@ namespace Chroma
       inline Coor<Nd> get_total_disps(const PathNode& disps)
       {
 	Coor<Nd> counts{{}};
-	for (const auto it : disps.p)
+	for (const auto& it : disps.p)
 	{
 	  if (std::abs(it.first) > 0)
 	  {
 	    int dir = std::abs(it.first) - 1;
-	    counts[dir]++;
+	    if (dir < Nd)
+	      counts.at(dir)++;
 	  }
 	}
 	return counts;
@@ -10492,17 +10493,18 @@ namespace Chroma
       inline Coor<Nd> get_max_disp(const PathNode& disps)
       {
 	Coor<Nd> max_disp{{}};
-	for (const auto it : disps.p)
+	for (const auto& it : disps.p)
 	{
 	  Coor<Nd> disp{{}};
 	  if (std::abs(it.first) > 0)
 	  {
 	    int dir = std::abs(it.first) - 1;
-	    disp[dir] = 1;
+	    if (dir < Nd)
+	      disp.at(dir) = 1;
 	  }
 	  Coor<Nd> this_max_disp = get_max_disp(it.second);
 	  for (std::size_t i = 0; i < Nd; ++i)
-	    max_disp[i] = std::max(max_disp[i], this_max_disp[i] + disp[i]);
+	    max_disp.at(i) = std::max(max_disp.at(i), this_max_disp.at(i) + disp.at(i));
 	}
 	return max_disp;
       }
@@ -10640,7 +10642,7 @@ namespace Chroma
 	// Apply displacements on the right and call recursively
 	const int num_vecs = right.kvdim()['n'];
 	unsigned int node_disp = 0;
-	for (const auto it : disps.p)
+	for (const auto& it : disps.p)
 	{
 	  detail::log(1, "push on direction " + std::to_string(it.first));
 	  // Apply displacement on the right vectors
@@ -10937,7 +10939,7 @@ namespace Chroma
 
 	// Apply displacements on colorvec2 and call recursively
 	unsigned int node_disp = 0;
-	for (const auto it : disps.p)
+	for (const auto& it : disps.p)
 	{
 	  detail::log(1, "for disps, push on direction " + std::to_string(it.first));
 	  // Apply displacement on the current colorvec
@@ -11135,7 +11137,7 @@ namespace Chroma
 
 	// Apply displacements on right and call recursively
 	unsigned int node_disp = 0;
-	for (const auto it : disps.p)
+	for (const auto& it : disps.p)
 	{
 	  detail::log(1, "for disps, push on direction " + std::to_string(it.first));
 	  // Apply displacement on the right colorvec

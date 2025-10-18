@@ -1393,11 +1393,12 @@ namespace Chroma
 
 	/// Return a list of ranges unique to the local partition
 
-	PartitionStored get_unique_fragments() const
+	PartitionStored get_unique_fragments(const Coor<N>& from, const Coor<N>& size) const
 	{
 	  int this_rank = MpiProcRank();
 	  typename TensorPartition<N>::PartitionStored r(1);
 	  r[0] = p[MpiProcRank()];
+	  r = superbblas::detail::intersection(r, from, size, dim);
 	  for (int rank = 0; rank < this_rank; ++rank)
 	  {
 	    for (const auto& fs :
@@ -7239,10 +7240,14 @@ namespace Chroma
 	    sparsity == Sparse && !direct)
 	{
 	  // Get the unique ranges of this tensor on this proc
-	  for (const auto& range : w.p->get_unique_fragments())
+	  for (const auto& range : w.p->get_unique_fragments(w.from, w.size))
 	  {
-	    kvslice_from_size(detail::to_kv(w.order, range[0]), detail::to_kv(w.order, range[1]))
-	      .copyFrom(w.slice_from_size(range[0], range[1]), true);
+	    using superbblas::detail::operator-;
+	    const auto& range_from = detail::normalize_coor(range[0] - w.from, w.dim);
+	    const auto& range_size = range[1];
+	    kvslice_from_size(detail::to_kv(w.order, range_from),
+			      detail::to_kv(w.order, range_size))
+	      .copyFrom(w.slice_from_size(range_from, range_size), true);
 	  }
 	  return;
 	}

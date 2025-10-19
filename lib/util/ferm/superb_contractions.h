@@ -848,6 +848,14 @@ namespace Chroma
 	return list;
       }
 
+#  if defined(QDP_IS_QDPJIT) && defined(SUPERBBLAS_USE_GPU)
+      inline int& get_default_gpu_device()
+      {
+	static int d = -1;
+	return d;
+      }
+#  endif
+
       // Get the cpu context
       inline std::shared_ptr<superbblas::Context>& getCpuContext()
       {
@@ -873,13 +881,7 @@ namespace Chroma
 	  int dev = -1;
 #    if defined(QDP_IS_QDPJIT)
 	  // When using QDP-JIT, the GPU device to use is already selected
-#      ifdef SUPERBBLAS_USE_CUDA
-	  superbblas::detail::gpuCheck(cudaGetDevice(&dev));
-#      elif defined(SUPERBBLAS_USE_HIP)
-	  superbblas::detail::gpuCheck(hipGetDevice(&dev));
-#      else
-#	error unsupported GPU platform
-#      endif
+	  dev = get_default_gpu_device();
 #    else
 	  // When not using QDP-JIT, select the GPU device based on either the local
 	  // MPI rank or the global MPI rank and assuming that consecutive MPI ranks
@@ -903,6 +905,7 @@ namespace Chroma
 	    }
 	  }
 #    endif
+	  std::cout << "Initializing SB context to device " << dev << std::endl;
 
 	  // Workaround on a potential issue in qdp-jit: avoid passing through the pool allocator
 #    if defined(QDP_IS_QDPJIT)

@@ -297,6 +297,11 @@ namespace Chroma
     QDPIO::cout << "Initializing QUDA memory" << std::endl;
     initQudaMemory();
 
+#    if defined(BUILD_SB) && defined(SUPERBBLAS_USE_GPU)
+    // Set device to run
+    SB::detail::get_default_gpu_device() = cuda_device;
+#    endif
+
 #  else // BUILD_QUDA
     std::cout << "Setting device" << std::endl;
 #    ifndef QDP_USE_COMM_SPLIT_INIT

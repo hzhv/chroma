@@ -1512,7 +1512,7 @@ namespace Chroma
 	    }
 
 	    // Solve Ax=0 with the random initial guesses
-	    nv = null_solver(op(b));
+	    nv = op(null_solver(b));
 	    b.scale(-1).addTo(nv);
 	    b.release();
 	  }

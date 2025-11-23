@@ -3696,6 +3696,29 @@ namespace Chroma
 	    .template cast<COMPLEX>();
 	}
       }
+
+      /// Returns a solver with possible different precision than the operator's
+      ///
+      /// \param op: operator to make the inverse of
+      /// \param ops: options to select the solver and the null-vectors creation
+
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getPrint(Operator<NOp, COMPLEX> op, const Options& ops,
+				      Operator<NOp, COMPLEX> prec_, SolverSpace solverSpace)
+      {
+	// Store operator in file
+	std::string save_op_in_file = getOption<std::string>(ops, "save_in_file", "");
+	if (save_op_in_file.size() > 0)
+	{
+	  if (!op.sp)
+	    ops.throw_error("getPrint: cannot store an implicit operator");
+	  op.sp.store(save_op_in_file);
+	}
+
+	// Get the solver options
+	const Options& solverOps = getOptions(ops, "solver");
+	return getSolver(op, solverOps, prec_, solverSpace);
+      }
     }
 
     /// Returns an operator that approximate the inverse of a given operator
@@ -3723,7 +3746,8 @@ namespace Chroma
 	DDAG,
 	G5,
 	BLOCKING,
-	CASTING
+	CASTING,
+	PRINT
       };
       static const std::map<std::string, SolverType> solverTypeMap{{"fgmres", FGMRES},
 								   {"bicgstab", BICGSTAB},
@@ -3740,7 +3764,8 @@ namespace Chroma
 								   {"igd", IGD},
 								   {"g5", G5},
 								   {"blocking", BLOCKING},
-								   {"casting", CASTING}};
+								   {"casting", CASTING},
+								   {"print", PRINT}};
       SolverType solverType = getOption<SolverType>(ops, "type", solverTypeMap);
       switch (solverType)
       {
@@ -3778,6 +3803,8 @@ namespace Chroma
 	return detail::getBlocking(op, ops, prec);
       case CASTING: // change the precision
 	return detail::getCasting(op, ops, prec, solverSpace);
+      case PRINT: // change the precision
+	return detail::getPrint(op, ops, prec, solverSpace);
       }
       throw std::runtime_error("This shouldn't happen");
     }

@@ -5531,6 +5531,9 @@ namespace Chroma
 	return max(r.make_sure(none, none, OnEveryoneReplicated));
     }
 
+    template <std::size_t N, typename T>
+    struct StorageTensor;
+
     /// Class for operating sparse tensors
     /// \tparam ND: number of domain dimensions
     /// \tparam NI: number of image dimensions
@@ -6920,19 +6923,49 @@ namespace Chroma
 	detail::log(1, ss.str());
       }
 
-      //void store(const std::string& name) const
-      //{
-      //  if (kron)
-      //    throw std::runtime_error("store: unsupported kron operators");
-      //  const auto& metadata = "<info>" + repr() + "</info>";
-      //  auto sto = StorageTensor<NI + ND, T>(filename, metadata, i.order + j.order,
-      //  				     detail::concat(i.size, j.size), Sparse);
+      void store(const std::string& filename) const
+      {
+	if (kron)
+	  throw std::runtime_error("store: unsupported kron operators");
+	const auto& metadata = "<info>" + repr() + "</info>";
+	auto sto = StorageTensor<NI + ND, T>(filename, metadata, i.order + d.order,
+					     detail::concat(i.size, d.size), SB::Sparse,
+					     SB::checksum_type::BlockChecksum, SB::LocalFSFile);
 
-      //  // Get the coordinates for all nonzeros
-      //  auto ii_host = ii.make_sure(none, OnHost, OnEveryoneReplicated);
-      //  auto jj_host = jj.make_sure(none, OnHost, OnEveryoneReplicated);
-      //  auto blks = 
-      //}
+	const auto& row_size = detail::to_kv(i.order, blki);
+	const auto& col_size = detail::to_kv(d.order, blkd);
+
+	// Get the coordinates for all nonzeros
+	auto ii_host =
+	  (ii.isSubtensor() ? ii.cloneOn(OnHost) : ii.make_sure(none, OnHost)).getLocal();
+	auto jj_host =
+	  (jj.isSubtensor() ? jj.cloneOn(OnHost) : jj.make_sure(none, OnHost)).getLocal();
+	auto data_host =
+	  (data.isSubtensor() ? data.cloneOn(OnHost) : data.make_sure(none, OnHost)).getLocal();
+	const int* ii_ptr = ii_host.data();
+	const Coor<ND>* jj_ptr = (Coor<ND>*)jj_host.data();
+	const auto& i_local_from = i.p->localFrom();
+	const auto& row_strides =
+	  superbblas::detail::get_strides<Index>(ii_host.size, superbblas::FastToSlow);
+	for (Index row_idx = 0, col0 = 0; row_idx < ii_host.volume(); ++row_idx)
+	{
+	  using superbblas::detail::operator+;
+	  const auto& row_first_coor =
+	    superbblas::detail::index2coor(row_idx, ii_host.size, row_strides) + i_local_from;
+	  const auto& row_from = detail::to_kv(ii_host.order, row_first_coor);
+	  auto sto_row = sto.kvslice_from_size(row_from, row_size);
+	  const auto& data_row = data_host.kvslice_from_size(row_from, row_size);
+	  for (std::size_t col = 0; col < ii_ptr[row_idx]; ++col, ++col0)
+	  {
+	    const auto& col_first_coor = jj_ptr[col0];
+	    if (col_first_coor[0] < 0)
+	      continue;
+	    const auto& col_from = detail::to_kv(d.order, col_first_coor);
+	    sto_row.kvslice_from_size(col_from, col_size)
+	      .copyFrom(data_row.kvslice_from_size({{'u', col}}, {{'u', 1}}));
+	  }
+	}
+      }
 
       /// Return a copy of the tensor in a different precision
       ///

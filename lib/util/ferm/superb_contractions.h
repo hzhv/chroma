@@ -1779,6 +1779,16 @@ namespace Chroma
 	  s << "}";
 	  return s;
 	}
+
+	template <typename Ostream, typename T, typename Q>
+	Ostream& operator<<(Ostream& s, const std::map<T, Q>& m)
+	{
+	  s << "{";
+	  for (const auto& i : m)
+	    s << "{" << i.first << "," << i.second << "}";
+	  s << "}";
+	  return s;
+	}
       }
 
       inline void log(int level, const std::string& s)
@@ -3342,12 +3352,22 @@ namespace Chroma
 				   "given in `m` doesn't match the output tensor's dimensions!");
 
 	// Compute the new order
-	std::string new_order = order;
+	std::map<char, std::pair<std::size_t, std::string>> m_replacement;
 	for (const auto& it : m)
+	  m_replacement[it.first.front()] = {it.first.size(), it.second};
+	std::string new_order;
+	for (auto it = order.begin(); it != order.end();)
 	{
-	  auto s_first = std::find(new_order.begin(), new_order.end(), it.first.front());
-	  new_order = std::string(new_order.begin(), s_first) + it.second +
-		      std::string(s_first + it.first.size(), new_order.end());
+	  if (m_replacement.count(*it) == 0)
+	  {
+	    new_order.push_back(*it);
+	    ++it;
+	  }
+	  else
+	  {
+	    new_order.append(m_replacement.at(*it).second);
+	    it += m_replacement.at(*it).first;
+	  }
 	}
 
 	// Compute the dimensions of the new tensor

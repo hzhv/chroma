@@ -2291,6 +2291,7 @@ namespace Chroma
 
 	bool use_Aee_prec = getOption<bool>(ops, "use_Aee_prec", false);
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Verbosity verb = getOption<Verbosity>(ops, "verbosity", getVerbosityMap(), NoOutput);
 
 	Tracker _t(std::string("setup eo solver ") + prefix);
 
@@ -2459,6 +2460,40 @@ namespace Chroma
 	      contract<NOp + 1>(opInvDiagO,
 				yo0.rename_dims(m_sc), "CS", CopyTo,
 				y.kvslice_from_size({{'X', 1}}, {{'X', 1}}));
+	    }
+
+	    // Compute the residual norm
+	    if (verb >= JustSummary)
+	    {
+	      // r = x - op*y
+	      auto ym = y.scale(-1);
+	      auto yme = ym.kvslice_from_size({{'X', 0}}, {{'X', 1}});
+	      auto ymo = ym.kvslice_from_size({{'X', 1}}, {{'X', 1}});
+	      auto r = x.clone();
+	      auto re = r.kvslice_from_size({{'X', 0}}, {{'X', 1}});
+	      contract(opDiagE, yme.rename_dims(m_sc), "CS", AddTo, re);
+	      op_eo(ymo).addTo(re);
+	      std::string order_cols = detail::remove_dimensions(x.order, op_eo.i.order);
+	      if (solverSpace == FullSpace)
+	      {
+		auto ro = r.kvslice_from_size({{'X', 1}}, {{'X', 1}});
+		contract(opDiagO, ymo.rename_dims(m_sc), "CS", AddTo, ro);
+		op_oe(yme).addTo(ro);
+		auto normx = norm<1>(x, op_eo.order_t + order_cols);
+		auto normr = norm<1>(r, op_eo.order_t + order_cols);
+		double max_tol = max(div(normr, normx));
+		QDPIO::cout << prefix << " MGPROTON EO error in full residual vector: "
+			    << detail::tostr(max_tol) << std::endl;
+	      }
+	      else
+	      {
+		auto normx =
+		  norm<1>(x.kvslice_from_size({{'X', 0}}, {{'X', 1}}), op_eo.order_t + order_cols);
+		auto normr = norm<1>(re, op_eo.order_t + order_cols);
+		double max_tol = max(div(normr, normx));
+		QDPIO::cout << prefix << " MGPROTON EO error in even residual vector: "
+			    << detail::tostr(max_tol) << std::endl;
+	      }
 	    }
 	  },
 	  op.i,
@@ -3907,6 +3942,8 @@ namespace Chroma
 
 	// Clone the matvec
 	LinearOperator<LatticeFermion>* fLinOp = S->genLinOp(state);
+	if (!fLinOp)
+	  throw std::runtime_error("Unsupported action by mgproton");
 	ColOrdering co = getOption<ColOrdering>(*ops, "InvertParam/operator_ordering",
 						getColOrderingMap(), ColumnMajor);
 	ColOrdering co_blk = getOption<ColOrdering>(*ops, "InvertParam/operator_block_ordering",
@@ -4572,6 +4609,8 @@ namespace Chroma
 
 	// Clone the matvec
 	LinearOperator<LatticeFermion>* fLinOp = S->genLinOp(state);
+	if (!fLinOp)
+	  throw std::runtime_error("Unsupported action by mgproton");
 	ColOrdering co = getOption<ColOrdering>(*ops, "Projector/operator_ordering",
 						getColOrderingMap(), ColumnMajor);
 	ColOrdering co_blk = getOption<ColOrdering>(*ops, "Projector/operator_block_ordering",

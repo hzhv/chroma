@@ -2784,7 +2784,8 @@ namespace Chroma
 	}
 
 	using superbblas::detail::operator+;
-	return Tensor<N, T>(*this, order, this->from + from, size);
+	return Tensor<N, T>(
+	  *this, order, normalize_coor(this->from + normalize_coor(from, this->size), dim), size);
       }
 
       /// Return a similar tensor keeping the same distribution
@@ -7237,7 +7238,9 @@ namespace Chroma
 	}
 
 	using superbblas::detail::operator+;
-	return StorageTensor<N, T>(*this, order, this->from + from, size, scalar);
+	return StorageTensor<N, T>(
+	  *this, order, normalize_coor(this->from + normalize_coor(from, this->size), dim), size,
+	  scalar);
       }
 
       StorageTensor<N, T> scale(T s) const

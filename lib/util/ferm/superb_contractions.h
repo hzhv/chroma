@@ -1358,7 +1358,8 @@ namespace Chroma
 	  return {Success, TensorPartition<Nout>{new_dim_aux.second, r, isLocal}};
 	}
 
-	/// Extend the support of distributed dimensions by one step in each direction
+	/// Extend the support of distributed dimensions on each process by the given amount
+	/// \param m: extension in the back/forward direction for each dimension
 
 	TensorPartition<N> extend_support(Coor<N> m) const
 	{
@@ -1374,6 +1375,57 @@ namespace Chroma
 	    }
 	    r.push_back(fs);
 	  }
+	  return TensorPartition<N>{dim, r, isLocal};
+	}
+
+	/// Extend the support of the distributed dimensions removing inaccessible corners
+	/// \param m: extension in the back/forward direction for each dimension
+
+	TensorPartition<N> extend_support_removing_corners(Coor<N> m) const
+	{
+	  std::vector<typename TensorPartition<N>::PartitionStored> raux;
+	  raux.reserve(p.size());
+	  for (const auto& i : p)
+	  {
+	    // Create extension
+	    superbblas::PartitionItem<N> fs;
+	    for (unsigned int j = 0; j < N; ++j)
+	    {
+	      fs[1][j] = std::min(i[1][j] + 2 * m[j], dim[j]);
+	      fs[0][j] = (fs[1][j] < dim[j] ? (i[0][j] - m[j] + dim[j]) % dim[j] : 0);
+	    }
+
+	    // Create hole
+	    superbblas::PartitionItem<N> hole;
+	    std::size_t hole_dim = 0;
+	    for (std::size_t j = 0; j < N; ++j)
+	    {
+	      if (m[j] == 0 || fs[1][j] == dim[j])
+	      {
+		hole[0][j] = 0;
+		hole[1][j] = dim[j];
+	      }
+	      else
+	      {
+		hole[0][j] = (i[0][j] + i[1][j] + m[j] - 1 + dim[j]) % dim[j];
+		hole[1][j] = dim[j] - i[1][j] - m[j] * 2 + 2;
+		hole_dim++;
+	      }
+	    }
+
+	    // Remove hole
+	    raux.push_back(hole_dim > 1 ? superbblas::make_hole(fs[0], fs[1], hole[0], hole[1], dim)
+					: TensorPartition<N>::PartitionStored(1, fs));
+	  }
+
+	  std::size_t max_components = 1;
+	  for (const auto& i : raux)
+	    max_components = std::max(max_components, i.size());
+
+	  typename TensorPartition<N>::PartitionStored r(p.size() * max_components);
+	  for (std::size_t i = 0; i < p.size(); ++i)
+	    std::copy(raux[i].begin(), raux[i].end(), r.begin() + i * max_components);
+
 	  return TensorPartition<N>{dim, r, isLocal};
 	}
 
@@ -5592,6 +5644,7 @@ namespace Chroma
       Tensor<NI + 2, int> jj;	   ///< Coordinate of the first element on each block
       Tensor<NI + ND + 1, T> data; ///< Nonzero values
       Tensor<NI + ND + 1, T> kron; ///< Nonzero values for the Kronecker values
+      std::map<char, int> domain_extension;	      ///< domain neighbors
       std::shared_ptr<superbblas::BSR_handle> handle; ///< suparbblas sparse tensor handle
       value_type scalar;			      ///< Scalar factor of the tensor
       bool isImgFastInBlock;			      ///< whether the BSR blocks are in row-major
@@ -5603,7 +5656,8 @@ namespace Chroma
       /// Low-level constructor with the Kronecker BSR extension
       SpTensor(Tensor<ND, T> d, Tensor<NI, T> i, Coor<ND> blkd, Coor<NI> blki, Coor<ND> krond,
 	       Coor<NI> kroni, Tensor<NI, int> ii, Tensor<NI + 2, int> jj,
-	       Tensor<NI + ND + 1, T> data, Tensor<NI + ND + 1, T> kron_data, value_type scalar,
+	       Tensor<NI + ND + 1, T> data, Tensor<NI + ND + 1, T> kron_data,
+	       const std::map<char, int>& domain_extension, value_type scalar,
 	       bool isImgFastInBlock, unsigned int nblockd, unsigned int nblocki,
 	       unsigned int nkrond, unsigned int nkroni)
 	: d(d.make_eg()),
@@ -5616,6 +5670,7 @@ namespace Chroma
 	  jj(jj),
 	  data(data),
 	  kron(kron_data),
+	  domain_extension(domain_extension),
 	  scalar(scalar),
 	  isImgFastInBlock(isImgFastInBlock),
 	  nblockd(nblockd),
@@ -5627,10 +5682,12 @@ namespace Chroma
 
       /// Low-level constructor without the Kronecker BSR extension
       SpTensor(Tensor<ND, T> d, Tensor<NI, T> i, Coor<ND> blkd, Coor<NI> blki, Tensor<NI, int> ii,
-	       Tensor<NI + 2, int> jj, Tensor<NI + ND + 1, T> data, value_type scalar,
+	       Tensor<NI + 2, int> jj, Tensor<NI + ND + 1, T> data,
+	       const std::map<char, int>& domain_extension, value_type scalar,
 	       bool isImgFastInBlock, unsigned int nblockd, unsigned int nblocki)
 	: SpTensor(d, i, blkd, blki, detail::ones<ND>(), detail::ones<NI>(), ii, jj, data,
-		   Tensor<NI + ND + 1, T>(), scalar, isImgFastInBlock, nblockd, nblocki, 0, 0)
+		   Tensor<NI + ND + 1, T>(), domain_extension, scalar, isImgFastInBlock, nblockd,
+		   nblocki, 0, 0)
       {
       }
 
@@ -5663,9 +5720,10 @@ namespace Chroma
 
       SpTensor(Tensor<ND, T> d, Tensor<NI, T> i, unsigned int nblockd, unsigned int nblocki,
 	       unsigned int nkrond, unsigned int nkroni, unsigned int num_neighbors,
-	       bool isImgFastInBlock = false)
+	       const std::map<char, int>& domain_extension, bool isImgFastInBlock = false)
 	: d{d.make_eg()},
 	  i{i.make_eg()},
+	  domain_extension(domain_extension),
 	  scalar{value_type{1}},
 	  isImgFastInBlock{isImgFastInBlock},
 	  nblockd(nblockd),
@@ -5779,6 +5837,8 @@ namespace Chroma
 	return (bool)kron;
       }
 
+
+
       /// Construct the sparse operator
       void construct()
       {
@@ -5789,6 +5849,7 @@ namespace Chroma
 	  throw std::runtime_error("SpTensor::construct: unexpected distribution of the data");
 
 	// Superbblas needs the column coordinates to be local
+#if SUPERBBLAS_VERSION < 3
 	// Remove the local domain coordinates to jj
 	const auto localFrom = d.p->localFrom();
 	const auto domDim = d.dim;
@@ -5796,6 +5857,12 @@ namespace Chroma
 	  jj.template transformWithCPUFunWithCoor<int>([&](const Coor<NI + 2>& c, const int& t) {
 	    return (t - localFrom[c[0]] + domDim[c[0]]) % domDim[c[0]];
 	  });
+	const auto d_partition = d.extend_support(domain_extension).p->p;
+#else
+	auto localjj = jj;
+	const auto d_partition =
+	  d.p->extend_support_removing_corners(kvcoors<ND>(d.order, domain_extension, 0)).p;
+#endif
 
 	std::string nonblock_img_labels(i.order.begin() + nblocki + nkroni, i.order.end());
 	if (!ii.isDistributedAs(this->i, nonblock_img_labels) ||
@@ -5817,13 +5884,22 @@ namespace Chroma
 	if (nkrond == 0 && nkroni == 0)
 	{
 	  superbblas::create_bsr<ND, NI, value_type>(
-	    i.p->p.data(), i.dim, d.p->p.data(), d.dim, 1, blki, blkd, isImgFastInBlock, &iiptr,
-	    &jjptr, &ptr, &data.ctx(), comm, superbblas::FastToSlow, &bsr);
+	    i.p->p.data(), i.dim,
+#  if SUPERBBLAS_VERSION >= 3
+	    1,
+#  endif
+	    d_partition.data(), d.dim, d_partition.size() / d.p->p.size(), blki, blkd,
+	    isImgFastInBlock, &iiptr, &jjptr, &ptr, &data.ctx(), comm, superbblas::FastToSlow,
+	    &bsr);
 	}
 	else
 	{
 	  superbblas::create_kron_bsr<ND, NI, value_type>(
-	    i.p->p.data(), i.dim, d.p->p.data(), d.dim, 1, blki, blkd, kroni, krond,
+	    i.p->p.data(), i.dim,
+#  if SUPERBBLAS_VERSION >= 3
+	    1,
+#  endif
+	    d_partition.data(), d.dim, d_partition.size() / d.p->p.size(), blki, blkd, kroni, krond,
 	    isImgFastInBlock, &iiptr, &jjptr, &ptr, &kron_ptr, &data.ctx(), comm,
 	    superbblas::FastToSlow, &bsr);
 	}
@@ -5847,6 +5923,7 @@ namespace Chroma
 			      nkrond,
 			      nkroni,
 			      (unsigned int)jj.kvdim().at('u'),
+			      domain_extension,
 			      isImgFastInBlock};
 
 	r.ii = ii.getLocal();
@@ -5881,6 +5958,7 @@ namespace Chroma
 			      nkrond,
 			      nkroni,
 			      (unsigned int)jj.kvdim().at('u'),
+			      domain_extension,
 			      isImgFastInBlock};
 
 	r.ii = ii.getGlocal();
@@ -5948,6 +6026,12 @@ namespace Chroma
 	auto new_blki = detail::insert_coor(blki, i_pos, new_blki_pos);
 	new_blki[i_pos + 1] /= new_blki_pos;
 
+	// Update the domain extension
+	std::map<char, int> new_domain_extension;
+	for (const auto& it : domain_extension)
+	  new_domain_extension[it.first == dom_dim_label ? dom_new_labels[1] : it.first] =
+	    it.second;
+
 	// Create the returning tensor
 	SpTensor<ND + 1, NI + 1, T> r{
 	  new_d,
@@ -5957,6 +6041,7 @@ namespace Chroma
 	  nkrond + (nblockd <= d_pos && d_pos < nblockd + nkrond ? 1 : 0),
 	  nkroni + (nblocki <= i_pos && i_pos < nblocki + nkroni ? 1 : 0),
 	  (unsigned int)jj.kvdim().at('u'),
+	  new_domain_extension,
 	  isImgFastInBlock};
 
 	ii.split_dimension(img_dim_label, img_new_labels, img_step).copyTo(r.ii);
@@ -5997,6 +6082,13 @@ namespace Chroma
 	  r.construct();
 
 	return r;
+      }
+
+      /// Return the domain tensor with the support on each process
+
+      Tensor<ND, T> get_extended_domain() const
+      {
+	return d.extend_support(domain_extension);
       }
 
       /// Return a slice of the tensor starting at coordinate `dom_kvfrom`, `img_kvfrom` and taking
@@ -6144,8 +6236,8 @@ namespace Chroma
 	}
 
 	// Create the returning tensor
-	SpTensor<ND, NI, T> r{new_d,  new_i,  nblockd,	     nblocki,
-			      nkrond, nkroni, num_neighbors, isImgFastInBlock};
+	SpTensor<ND, NI, T> r{new_d,  new_i,	     nblockd,	       nblocki,		nkrond,
+			      nkroni, num_neighbors, domain_extension, isImgFastInBlock};
 	new_ii.copyTo(r.ii);
 	new_jj.kvslice_from_size({}, {{'u', num_neighbors}}).copyTo(r.jj);
 
@@ -6423,8 +6515,8 @@ namespace Chroma
 	}
 
 	// Create the returning tensor
-	SpTensor<ND, NI, T> r{new_d,  new_i,  nblockd,	     nblocki,
-			      nkrond, nkroni, num_neighbors, isImgFastInBlock};
+	SpTensor<ND, NI, T> r{new_d,  new_i,	     nblockd,	       nblocki,		nkrond,
+			      nkroni, num_neighbors, domain_extension, isImgFastInBlock};
 	new_ii.copyTo(r.ii);
 	new_jj.kvslice_from_size({}, {{'u', num_neighbors}}).copyTo(r.jj);
 
@@ -6605,8 +6697,8 @@ namespace Chroma
 	auto new_kron = kron ? kron.reorder(data_order) : kron;
 
 	SpTensor<ND, NI, T> r(new_d, new_i, new_blkd, new_blki, new_krond, new_kroni, new_ii,
-			      new_jj, new_data, new_kron, scalar, isImgFastInBlock, nblockd,
-			      nblocki, nkrond, nkroni);
+			      new_jj, new_data, new_kron, domain_extension, scalar,
+			      isImgFastInBlock, nblockd, nblocki, nkrond, nkroni);
 	if (is_constructed())
 	  r.construct();
 
@@ -6637,6 +6729,7 @@ namespace Chroma
 					 is_kron ? nkrond + 1 : 0,
 					 is_kron ? nkroni + 1 : 0,
 					 (unsigned int)jj.kvdim().at('u'),
+					 domain_extension,
 					 isImgFastInBlock};
 
 	// Copy the data to the new tensor
@@ -6717,6 +6810,7 @@ namespace Chroma
 			      nkrond,
 			      nkroni,
 			      (unsigned int)jj.kvdim().at('u'),
+			      domain_extension,
 			      isImgFastInBlock};
 
 	// Populate the new tensor
@@ -7017,6 +7111,7 @@ namespace Chroma
 			      jj,
 			      data.template cast<Q>(),
 			      kron.template cast<Q>(),
+			      domain_extension,
 			      (Q)scalar,
 			      isImgFastInBlock,
 			      nblockd,
@@ -7036,7 +7131,7 @@ namespace Chroma
     template <std::size_t ND, std::size_t NI, typename T>
     SpTensor<ND, NI, T> getSparseIdentity(const SpTensor<ND, NI, T>& sp, const remap& m)
     {
-      SpTensor<ND, NI, T> r(sp.d, sp.i, sp.nblockd, sp.nblocki, sp.nkrond, sp.nkroni, 1,
+      SpTensor<ND, NI, T> r(sp.d, sp.i, sp.nblockd, sp.nblocki, sp.nkrond, sp.nkroni, 1, {},
 			    sp.isImgFastInBlock);
       r.ii.set(1);
       int tilde_pos = std::find(r.jj.order.begin(), r.jj.order.end(), '~') - r.jj.order.begin();
@@ -7659,9 +7754,24 @@ namespace Chroma
       Tensor<N, T> make_compatible_dom(const std::string& col_order,
 				       const std::map<char, int>& m) const
       {
-	return d.template make_compatible<N, T>(
-	  preferred_col_ordering == ColumnMajor ? std::string("%") + col_order : col_order + "%",
-	  '%', "", m);
+	// For column major, the column labels go to the slowest indices
+	if (preferred_col_ordering == ColumnMajor)
+	  return d.template make_compatible<N, T>(std::string("%") + col_order, '%', "", m);
+
+	// For the row major, the column labels go after the spin and color components
+	const auto my_tolower = [&](char ch) {
+	  return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+	};
+	std::size_t pos = 0; // number of spin and color labels
+	for (const char c : d.order)
+	{
+	  if (my_tolower(c) != 'c' && my_tolower(c) != 's')
+	    break;
+	  ++pos;
+	}
+	std::string new_order = std::string(d.order.begin(), d.order.begin() + pos) + col_order +
+				std::string(d.order.begin() + pos, d.order.end());
+	return d.template make_compatible<N, T>(new_order, m);
       }
 
       /// Return compatible image tensors
@@ -7672,9 +7782,24 @@ namespace Chroma
       Tensor<N, T> make_compatible_img(const std::string& col_order,
 				       const std::map<char, int>& m) const
       {
-	return i.template make_compatible<N, T>(
-	  preferred_col_ordering == ColumnMajor ? std::string("%") + col_order : col_order + "%",
-	  '%', "", m);
+	// For column major, the column labels go to the slowest indices
+	if (preferred_col_ordering == ColumnMajor)
+	  return i.template make_compatible<N, T>(std::string("%") + col_order, '%', "", m);
+
+	// For the row major, the column labels go after the spin and color components
+	const auto my_tolower = [&](char ch) {
+	  return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+	};
+	std::size_t pos = 0; // number of spin and color labels
+	for (const char c : i.order)
+	{
+	  if (my_tolower(c) != 'c' && my_tolower(c) != 's')
+	    break;
+	  ++pos;
+	}
+	std::string new_order = std::string(d.order.begin(), d.order.begin() + pos) + col_order +
+				std::string(d.order.begin() + pos, d.order.end());
+	return i.template make_compatible<N, T>(new_order, m);
       }
 
       /// Apply the operator
@@ -8626,21 +8751,22 @@ namespace Chroma
 	ones_blk.set(1);
 
 	// Create the sparse tensor
-	auto d_sop =
-	  (power == 0 ? i
-		      : i.extend_support({{'x', (max_dist_neighbors + real_maxX - 1) / real_maxX},
-					  {'y', max_dist_neighbors},
-					  {'z', max_dist_neighbors},
-					  {'t', max_dist_neighbors}}))
-	    .rename_dims(rd);
+	const auto dom_ext =
+	  (power == 0
+	     ? std::map<char, int>{}
+	     : std::map<char, int>{{rd.at('x'), (max_dist_neighbors + real_maxX - 1) / real_maxX},
+				   {rd.at('y'), max_dist_neighbors},
+				   {rd.at('z'), max_dist_neighbors},
+				   {rd.at('t'), max_dist_neighbors}});
 	const unsigned int Nkron = kronecker_label == 0 ? 0u : 1u;
-	SpTensor<NOp, NOp, COMPLEX> sop{d_sop,
+	SpTensor<NOp, NOp, COMPLEX> sop{i.rename_dims(rd),
 					i,
 					Nblk - Nkron,
 					Nblk - Nkron,
 					Nkron,
 					Nkron,
 					(unsigned int)neighbors.size(),
+					dom_ext,
 					coBlk == ColumnMajor};
 
 	// Copy the kronecker values
@@ -9734,7 +9860,7 @@ namespace Chroma
 	      eg, eg, nullptr, "", op_layout, op_layout,
 	      detail::getNeighbors(eg.kvdim(), 1 /* near-neighbors links only */, op_layout),
 	      ColumnMajor, false /* no kronecker op */},
-	    ColumnMajor, RowMajor, Chroma::SB::detail::ConsiderBlockingDense, "laplacian");
+	    RowMajor, ColumnMajor, Chroma::SB::detail::ConsiderBlockingDense, "laplacian");
 
 	  // Create an auxiliary struct for the PRIMME's matvec
 	  // NOTE: Please keep 'n' as the slowest index; the rows of vectors taken by PRIMME's matvec has dimensions 'cxyztX',

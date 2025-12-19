@@ -3945,9 +3945,9 @@ namespace Chroma
 	if (!fLinOp)
 	  throw std::runtime_error("Unsupported action by mgproton");
 	ColOrdering co = getOption<ColOrdering>(*ops, "InvertParam/operator_ordering",
-						getColOrderingMap(), ColumnMajor);
+						getColOrderingMap(), RowMajor);
 	ColOrdering co_blk = getOption<ColOrdering>(*ops, "InvertParam/operator_block_ordering",
-						    getColOrderingMap(), RowMajor);
+						    getColOrderingMap(), ColumnMajor);
 	Operator<Nd + 7, Complex> linOp = detail::cloneOperator(
 	  asOperatorView(*fLinOp), co, co_blk, detail::ConsiderBlockingSparse, "chroma's operator");
 
@@ -4612,9 +4612,9 @@ namespace Chroma
 	if (!fLinOp)
 	  throw std::runtime_error("Unsupported action by mgproton");
 	ColOrdering co = getOption<ColOrdering>(*ops, "Projector/operator_ordering",
-						getColOrderingMap(), ColumnMajor);
+						getColOrderingMap(), RowMajor);
 	ColOrdering co_blk = getOption<ColOrdering>(*ops, "Projector/operator_block_ordering",
-						    getColOrderingMap(), RowMajor);
+						    getColOrderingMap(), ColumnMajor);
 	Operator<Nd + 7, Complex> linOp = detail::cloneOperator(
 	  asOperatorView(*fLinOp), co, co_blk, detail::ConsiderBlockingSparse, "chroma's operator");
 

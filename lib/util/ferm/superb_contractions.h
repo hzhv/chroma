@@ -1404,11 +1404,15 @@ namespace Chroma
 	  r = superbblas::detail::intersection(r, from, size, dim);
 	  for (int rank = 0; rank < this_rank; ++rank)
 	  {
+	    PartitionStored rr;
+	    rr.reserve(r.size());
 	    for (const auto& fs :
 		 superbblas::make_hole(Coor<N>{{}}, dim, p[rank][0], p[rank][1], dim))
 	    {
-	      r = superbblas::detail::intersection(r, fs[0], fs[1], dim);
+	      const auto& ri = superbblas::detail::intersection(r, fs[0], fs[1], dim);
+	      rr.insert(rr.end(), ri.begin(), ri.end());
 	    }
+	    std::swap(rr, r);
 	  }
 	  return r;
 	}
@@ -7284,7 +7288,7 @@ namespace Chroma
       template <std::size_t Nw, typename Tw,
 		typename std::enable_if<
 		  detail::is_complex<T>::value == detail::is_complex<Tw>::value, bool>::type = true>
-      void copyFrom(const Tensor<Nw, Tw>& w, bool direct = false) const
+      void copyFrom(const Tensor<Nw, Tw>& w) const
       {
 	Coor<N> wsize = kvcoors<N>(order, w.kvdim(), 1, NoThrow);
 	for (unsigned int i = 0; i < N; ++i)
@@ -7296,7 +7300,7 @@ namespace Chroma
 
 	// Avoid saving ranges of the local support of the tensor that are also on other processes
 	if (filesystem_type == LocalFSFile && w.dist != Local && w.dist != Glocal &&
-	    sparsity == Sparse && !direct)
+	    sparsity == Sparse)
 	{
 	  // Get the unique ranges of this tensor on this proc
 	  for (const auto& range : w.p->get_unique_fragments(w.from, w.size))
@@ -7306,7 +7310,7 @@ namespace Chroma
 	    const auto& range_size = range[1];
 	    kvslice_from_size(detail::to_kv(w.order, range_from),
 			      detail::to_kv(w.order, range_size))
-	      .copyFrom(w.slice_from_size(range_from, range_size), true);
+	      .copyFrom(w.slice_from_size(range_from, range_size).getLocal());
 	  }
 	  return;
 	}

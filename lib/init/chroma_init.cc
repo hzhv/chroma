@@ -319,6 +319,11 @@ namespace Chroma
 #    else
     QDP_startGPU();
 #    endif
+
+#    if defined(BUILD_SB) && defined(SUPERBBLAS_USE_GPU)
+    // Set device to run
+    SB::detail::get_default_gpu_device() = dev;
+#    endif
 #  endif // BUILD_CUDA
 
 #elif defined(BUILD_SB) && defined(SUPERBBLAS_USE_GPU)

@@ -5837,8 +5837,6 @@ namespace Chroma
 	return (bool)kron;
       }
 
-
-
       /// Construct the sparse operator
       void construct()
       {
@@ -5851,13 +5849,14 @@ namespace Chroma
 	// Superbblas needs the column coordinates to be local
 #if SUPERBBLAS_VERSION < 3
 	// Remove the local domain coordinates to jj
-	const auto localFrom = d.p->localFrom();
+	const auto new_d = d.extend_support(domain_extension);
+	const auto d_partition = new_d.p->p;
+	const auto localFrom = new_d.p->localFrom();
 	const auto domDim = d.dim;
 	auto localjj =
 	  jj.template transformWithCPUFunWithCoor<int>([&](const Coor<NI + 2>& c, const int& t) {
 	    return (t - localFrom[c[0]] + domDim[c[0]]) % domDim[c[0]];
 	  });
-	const auto d_partition = d.extend_support(domain_extension).p->p;
 #else
 	auto localjj = jj;
 	const auto d_partition =

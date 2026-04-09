@@ -1,0 +1,186 @@
+#!/usr/bin/env python
+
+#  Copyright (c) 2016, College of William & Mary
+#  All rights reserved.
+#  
+#  Redistribution and use in source and binary forms, with or without
+#  modification, are permitted provided that the following conditions are met:
+#      * Redistributions of source code must retain the above copyright
+#        notice, this list of conditions and the following disclaimer.
+#      * Redistributions in binary form must reproduce the above copyright
+#        notice, this list of conditions and the following disclaimer in the
+#        documentation and/or other materials provided with the distribution.
+#      * Neither the name of College of William & Mary nor the
+#        names of its contributors may be used to endorse or promote products
+#        derived from this software without specific prior written permission.
+#  
+#  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+#  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+#  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+#  DISCLAIMED. IN NO EVENT SHALL COLLEGE OF WILLIAM & MARY BE LIABLE FOR ANY
+#  DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+#  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+#  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+#  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+#  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+#  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#  
+#  PRIMME: https://github.com/primme/primme
+#  Contact: Andreas Stathopoulos, a n d r e a s _at_ c s . w m . e d u
+
+import numpy as np
+from numpy.testing import assert_allclose
+import scipy.sparse
+import primme
+
+
+# Sparse diagonal matrix of size 100
+A = scipy.sparse.spdiags(np.asarray(range(100), dtype=np.float32), [0], 100, 100)
+
+# Compute the three largest eigenvalues of A with a residual norm tolerance of 1e-6
+evals, evecs = primme.eigsh(A, 3, tol=1e-6, which='LA')
+assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-6*100)
+print(evals) # [ 99.,  98.,  97.]
+
+# Return only the eigenvalues
+evals = primme.eigsh(A, 3, tol=1e-6, which='LA', return_eigenvectors=False)
+assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-6*100)
+
+# Compute the three largest eigenvalues of A orthogonal to the previous computed
+# eigenvectors, i.e., the next three eigenvalues
+evals, evecs = primme.eigsh(A, 3, tol=1e-6, which='LA', lock=evecs)
+assert_allclose(evals, [ 96.,  95.,  94.], atol=1e-6*100)
+print(evals) # [ 96.,  95.,  94.]
+
+# Compute the three closest eigenvalues to 50.1
+evals, evecs = primme.eigsh(A, 3, tol=1e-6, which=50.1)
+assert_allclose(evals, [ 50.,  51.,  49.], atol=1e-6*100)
+print(evals) # [ 50.,  51.,  49.]
+
+# Estimation of the largest eigenvalue in magnitude
+def convtest_lm(eval, evecl, rnorm):
+   return np.abs(eval) > 0.1 * rnorm
+eval, evec = primme.eigsh(A, 1, which='LM', convtest=convtest_lm)
+assert_allclose(eval, [ 99.], atol=.1)
+
+try:
+    import cupy, cupyx
+    test_gpu = True
+except Exception:
+    test_gpu = False
+    print("Not testing GPU examples")
+
+if test_gpu:
+    # Simple GPU test with a cupy matrix
+    Agpu = cupy.diag(cupy.asarray(range(100), dtype=np.float32))
+    evals, evecs = primme.eigsh(Agpu, 3, tol=1e-6, which='LA')
+    assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-6*100)
+
+    # Simple GPU test passing the matvec function
+    def Afgpu(x): return Agpu.dot(x)
+    Afgpu.shape = Agpu.shape
+    Afgpu.dtype = Agpu.dtype
+    evals, evecs = primme.eigsh(Afgpu, 3, tol=1e-6, which='LA', driver='cupy')
+    assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-6*100)
+    
+# Return and show convergence history
+eval, evec, stats = primme.eigsh(A, 1, which='LM', return_stats=True, return_history=True)
+print("MV Time Eval Res") 
+import pprint
+pprint.pprint(list(zip(stats['hist']['numMatvecs'], stats['hist']['elapsedTime'], stats['hist']['eval'], stats['hist']['resNorm'])))
+
+# User-defined matvec: implicit diagonal matrix
+Adiag = np.arange(0, 100).reshape((100,1))
+def Amatmat(x):
+   if len(x.shape) == 1: x = x.reshape((100,1))
+   return Adiag * x   # equivalent to diag(Adiag).dot(x)
+A = scipy.sparse.linalg.LinearOperator((100,100), matvec=Amatmat, matmat=Amatmat)
+evals, evecs = primme.eigsh(A, 3, tol=1e-6, which='LA')
+assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-6*100)
+
+# Don't raise exception if some values were not found
+evals, evecs = primme.eigsh(A, 10, tol=1e-3, which='LA', maxiter=30, raise_for_unconverged=False)
+assert(len(evals) > 0)
+print(evals) # [ 98.9]
+
+# Sparse singular mass matrix
+A = scipy.sparse.spdiags(np.asarray(range(1,100), dtype=np.float32), [0], 99, 99)
+M = scipy.sparse.spdiags(np.asarray(range(99,-1,-1), dtype=np.float32), [0], 99, 99)
+evals, evecs = primme.eigsh(A, 3, M=M, tol=1e-6, which='SA')
+assert_allclose(evals, [ 1./99.,  2./98.,  3./97.], atol=1e-6*100)
+print(evals)
+
+# Get PRIMME properties within a callback
+def convtest_rel_Anorm(eval, evec, rnorm):
+   estimateAnorm = primme.get_eigsh_param('stats_estimateLargestSVal')
+   return rnorm <= estimateAnorm * 1e-3
+evals, evecs = primme.eigsh(A, 3, which='LA', convtest=convtest_rel_Anorm)
+assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-3*3)
+
+def P(x):
+   # The scipy.sparse.linalg.LinearOperator constructor may call this function giving a vector
+   # as input; detect that case and return whatever
+   if x.ndim == 1:
+      return x / A.diagonal()
+   shifts = primme.get_eigsh_param('ShiftsForPreconditioner')
+   y = np.copy(x)
+   for i in range(x.shape[1]): y[:,i] = x[:,i] / (A.diagonal() - shifts[i])
+   return y
+Pop = scipy.sparse.linalg.LinearOperator(A.shape, matvec=P, matmat=P)
+evals, evecs = primme.eigsh(A, 3, OPinv=Pop, tol=1e-3, which='LA')
+assert_allclose(evals, [ 99.,  98.,  97.], atol=1e-3*3)
+ 
+# Sparse rectangular matrix 100x10 with non-zeros on the main diagonal
+A = scipy.sparse.spdiags(range(10), [0], 100, 10)
+
+# Compute the three closest to 4.1 singular values and the left and right corresponding
+# singular vectors
+svecs_left, svals, svecs_right = primme.svds(A, 3, tol=1e-6, which=4.1)
+assert_allclose(sorted(svals), [ 3.,  4.,  5.], atol=1e-6*10)
+print(svals) # [ 4.,  5.,  3.]
+
+# Sparse random rectangular matrix 10^5x100
+A = scipy.sparse.rand(10000, 100, density=0.001, random_state=10)
+
+# Compute the three closest singular values to 6.0 with a tolerance of 1e-6
+svecs_left, svals, svecs_right, stats = primme.svds(A, 3, which='SM', tol=1e-6,
+                                                    return_stats=True)
+A_svals = svals
+print(svals)
+print(stats["elapsedTime"], stats["numMatvecs"])
+
+# Compute the square diagonal preconditioner
+prec = scipy.sparse.spdiags(np.reciprocal(A.multiply(A).sum(axis=0)),
+          [0], 100, 100)
+
+# Recompute the singular values but using the preconditioner
+svecs_left, svals, svecs_right, stats = primme.svds(A, 3, which='SM', tol=1e-6,
+                        precAHA=prec, return_stats=True)
+assert_allclose(svals, A_svals, atol=1e-6*100)
+print(stats["elapsedTime"], stats["numMatvecs"])
+
+if test_gpu:
+    # Simple GPU test with a matrix
+    Agpu = cupyx.scipy.sparse.spdiags(cupy.asarray([range(100),np.ones(100)], dtype=cupy.float32), [0,1], 100, 100)
+    svecs_left, svals, svecs_right, stats = primme.svds(Agpu, 3, which='SM', tol=1e-6,
+                                                        return_stats=True)
+    assert_allclose(svals, [1.283498, 2.130866, 3.08505], atol=1e-6*103)
+
+# Estimation of the smallest singular value
+def convtest_sm(sval, svecl, svecr, rnorm):
+   return sval > 0.1 * rnorm
+svec_left, sval, svec_right, stats = primme.svds(A, 1, which='SM',
+                        convtest=convtest_sm, return_stats=True)
+assert_allclose(sval, [ 1.], atol=.1)
+
+# User-defined matvec: implicit rectangular matrix with nonzero elements on the diagonal only
+A = scipy.sparse.spdiags(range(10), [0], 100, 10)
+def Amatmat(x):
+   if len(x.shape) == 1: x = x.reshape((x.shape[0],1))
+   return A.dot(x)
+def Armatmat(x):
+   if len(x.shape) == 1: x = x.reshape((x.shape[0],1))
+   return A.H.dot(x)
+Aop = scipy.sparse.linalg.LinearOperator((100,10), matvec=Amatmat, matmat=Amatmat, rmatvec=Armatmat, dtype=A.dtype)
+svecs_left, svals, svecs_right = primme.svds(Aop, 3, which='LM', tol=1e-6)
+assert_allclose(svals, [ 9.,  8.,  7.], atol=1e-6*100)

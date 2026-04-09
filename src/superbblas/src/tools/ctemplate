@@ -1,0 +1,137 @@
+#!/usr/bin/env python
+
+import re
+import sys
+
+def get_words(text, split=None):
+    if split is None:
+        return re.findall(r'\S+', text)
+    else:
+        return text.split(split)
+
+def generate_emits(s):
+    """
+    Return a text containing substrings of the input text starting with `EMIT` and replacing part of
+    the texts if commanded.
+
+    This function finds on the input text substring with this form:
+
+       EMIT [ REPLACE( <word>+ [, <word>+ ]+ ) ]+ (#.* <new_line>|[^;]+;)
+
+    where `[ ... ]` means optional, `+` means one or more, <word> means \w+, and <new_line> is the
+    character for new lines. If `REPLACE` is present, it emits a new line replacing the words at
+    the first argument by the values at the subsequent arguments. Several `EMITS` are equivalent to
+    the Cartesian product of all replacements. For instance, the following input texts will emit the
+    next texts:
+
+       EMIT #hello<new_line>
+       > #hello<new_line>
+
+       EMIT REPLACE(hello,bye) #hello<new_line>
+       > #bye<new_line>
+
+       EMIT REPLACE(A,g) void A();
+       > void g();
+
+       EMIT REPLACE(A N,a 0,b 1) void f<A,N>(A);
+       > void f<a,0>(a);
+       > void f<b,1>(b);
+
+       EMIT REPLACE(A N,a 0,b 1) REPLACE(C,,*) void f<A,N>(A C);
+       > void f<a,0>(a);
+       > void f<b,1>(b);
+       > void f<a,0>(a *);
+       > void f<b,1>(b *);
+
+       EMIT REPLACE(A N,a 0,b 1) REPLACE(K,@,*) void f<A,N>(A C);
+       > void f<a,0>(a);
+       > void f<b,1>(b);
+    """
+
+    r = []
+    p = r'\s*'.join(r'EMIT (?P<REPLACE>(REPLACE [^( ]? [^( ]? \([^\)]*\) )*) (?P<D>\'?"?#[^\n]*\n|[^;]*;)'.split())
+    for m in re.finditer(p, s):
+        # Replace the words in the first argument of REPLACE by the following arguments of REPLACE
+        # on the string D
+        if not m.group('D'): continue
+        D = set((m.group('D'),))
+        for ex, args in re.findall(r'\s*'.join(r'REPLACE ([^( ]? [^( ]?) \( ([^)]*) \)'.split()), m.group('REPLACE')):
+            one, split_args, split_tokens = False, ',', None
+            ex = get_words(ex)
+            if len(ex) == 1 and len(ex[0]) == 2: ex = (ex[0][0], ex[0][1])
+            if ex and ex[0] == '1':
+                one = True
+                ex = ()
+            if len(ex) >= 1: split_args = ex[0]
+            if len(ex) >= 2: split_tokens = ex[1]
+            args = get_words(args, split_args)
+            if not args: continue
+            tokens = get_words(args[0], split_tokens)
+            new_Ds = set()
+            repl_texts = (split_args.join(args[1:]),) if one else args[1:]
+            for repl_text in repl_texts:
+                replacements = (repl_text,) if one else get_words(repl_text, split_tokens)
+                if not replacements:
+                    replacements = ["" for i in tokens]
+                if len(replacements) != len(tokens):
+                    raise Exception("Invalid `REPLACE`: all arguments should have the same number of words as the first argument:\n" + m.group(0))
+                for text in D:
+                    for token, replacement in zip(tokens, replacements):
+                        patt = r'\b{0}\b' if re.match(r'^\w+$', token) else '{0}'
+                        text = re.sub(patt.format(re.escape(token)), replacement, text)
+                    new_Ds.add(text)
+            D = new_Ds
+        r.extend(sorted(D)) 
+    return "\n".join(r)
+
+def test_generate_emits():
+    s = "EMIT #pragma error\nNOTHING FROM THIS LINE;"
+    r = generate_emits(s)
+    assert("EMIT" not in r)
+    assert("#pragma error" in r)
+    assert("NOTHING FROM THIS LINE" not in r)
+
+    s = "EMIT REPLACE(A N,a 0,b 1,c 2) template void h<A,N>\n(A a);\nNOTHING FROM THIS LINE;"
+    r = generate_emits(s)
+    assert("template void h<A,N>\n(A a);" not in r)
+    assert("template void h<a,0>\n(a a);" in r)
+    assert("template void h<b,1>\n(b a);" in r)
+    assert("template void h<c,2>\n(c a);" in r)
+    assert("NOTHING FROM THIS LINE" not in r)
+
+    s = "EMIT REPLACE(A N,a 0,b 1) REPLACE(C,,*) template void h<A,N>\n(A C);\nNOTHING FROM THIS LINE;"
+    r = generate_emits(s)
+    assert("template void h<a,0>\n(a );" in r)
+    assert("template void h<b,1>\n(b );" in r)
+    assert("template void h<a,0>\n(a *);" in r)
+    assert("template void h<b,1>\n(b *);" in r)
+    assert("NOTHING FROM THIS LINE" not in r)
+
+    s = "EMIT REPLACE(A N,a 0,b 1) REPLACE(K,,) template void h<A,N>\n(A C);\nNOTHING FROM THIS LINE;"
+    r = generate_emits(s)
+    assert("template void h<a,0>\n(a C);\ntemplate void h<b,1>\n(b C);" == r)
+
+    s = '''EMIT REPLACE(" ",) "#" define "DEF"\n'''
+    r = generate_emits(s)
+    assert("# define DEF\n" == r)
+
+    s = 'EMIT REPLACE1(A,a a,a,a) f(A);'
+    r = generate_emits(s)
+    assert("f(a a,a,a);" == r)
+
+    s = 'EMIT REPLACE ! (A ! a,a,a) f(A);'
+    r = generate_emits(s)
+    assert("f(a,a,a);" == r)
+
+    s = 'EMIT REPLACE !% (A a%B!a%b) f(A a, B);'
+    r = generate_emits(s)
+    assert("f(a, b);" == r)
+
+
+if __name__ == "__main__":
+    if "-t" in sys.argv:
+        test_generate_emits()
+    else:
+        # Filter out lines starting with '#', they are preprocessor notes
+        s = "".join([l for l in sys.stdin.readlines() if not l.startswith("#")])
+        sys.stdout.write(generate_emits(s))

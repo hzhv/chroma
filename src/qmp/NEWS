@@ -1,0 +1,110 @@
+9/16/2014 -- James Osborn
+
+        2.5.0
+	added subdir-objects automake option
+	merged mpiaccess branch
+
+6/1/2014 -- Carleton DeTar
+ 
+        2.4.2
+        Restored QMP_sum_long_double, which was apparently lost.
+        Incremented minor version to make the distinction.
+
+4/22/2014 -- James Osborn
+
+        2.4.1
+        Added improved SPI code.
+        Allow MPI version to send message to self.
+
+6/25/2013 -- Carleton DeTar
+
+        2.4.1
+        Added QMP_sum_long_double
+
+7/05/2012 -- James Osborn
+
+	2.4.0-a6
+	Added missing header to distribution.
+
+6/27/2012 -- James Osborn
+
+	2.4.0-a5
+	Added BG/Q SPI code.
+	Added new QMP_clear_to_send function.
+
+1/25/2012 -- James Osborn
+
+	Keep last element of argv NULL when removing arguments
+
+3/18/2011 -- James Osborn
+
+	2.4.0-a4: fixed bug in QMP_comm_declare_logical_topology using wrong communicator
+
+1/28/2011 -- James Osborn
+
+	2.4.0-a3: removed anonymous union, added get_logical_coordinates_from2 functions
+
+12/14/2009 -- Carleton DeTar
+
+        Version 2.3.2  Support dynamical partitioning of the machine to allow
+        running multiple independent jobs.
+
+01/25/2008 -- James Osborn
+
+	Added BG/P personality info.  Now uses MPI_Cart_create to layout
+	logical topology.
+
+05/25/2006 -- Robert Edwards
+
+	Version 2.1.6 : Minutae - fixed error string output names in single node
+        codes.
+
+08/17/2005 -- James Osborn
+
+	Version 2.1.0 : Uses persistent communication requests now.
+
+06/29/2005 -- Robert Edwards
+
+	Version 2.0.4 : Removed some ANSI-99-isms. Should compile under c89
+
+05/24/2005 -- Robert Edwards
+
+	Version 2.0.1 : New install scripts.
+
+11/22/2004 -- Robert Edwards
+
+	Version 2.0.0 : No more beta's. It's now real.
+
+10/18/2004 -- Robert Edwards
+
+	Version 2.0.beta4 : Beta release before version 2.
+
+09/06/2004 -- James Osborn
+
+	Version 2.0.beta1 : Beta release before version 2.
+
+04/07/2003 -- Robert Edwards
+
+	Version 1.2.8 : Minor tweaks - debugging comments.
+
+12/23/2003 -- Robert Edwards
+
+	Version 1.2.7 : Small debugging fixes in QMP_genutil.c
+
+12/18/2003 -- Robert Edwards
+
+	Version 1.2.6 : Added QMP_route.
+
+06/05/2003 -- Robert Edwards
+
+	Version 1.2.5 : Changed QMP_get_logical_coordinates_from to not have
+        const modifier.
+
+06/04/2003 -- Robert Edwards
+
+	Version 1.2.4 : Added QMP_abort()
+
+06/04/2003 -- Robert Edwards
+
+	Version 1.2.3 : bjoo fixed memory leak in MPI version.
+

@@ -1,0 +1,114 @@
+#---------------------------------------------------------------
+#         ENVIRONMENT VARIABLES AND COMPILATION FLAGS
+#       for building the library and compiling the tests
+#---------------------------------------------------------------
+
+# Define the path to the created PRIMME library
+MAJORVERSION := 3
+VERSION := 3.2
+UNAME ?= $(shell uname)
+ifeq ($(UNAME), Darwin)
+    SLIB ?= dylib
+    SONAMELIBRARY ?= libprimme.$(VERSION).$(SLIB)
+    SONAMELIBRARYMAJOR ?= libprimme.$(MAJORVERSION).$(SLIB)
+    SOFLAGS ?= -dynamiclib -Wl,-install_name,$(SONAMELIBRARY) -current_version $(VERSION) -compatibility_version $(VERSION) -Wl,-undefined -Wl,dynamic_lookup
+else
+    SLIB ?= so
+    SONAMELIBRARY ?= libprimme.$(SLIB).$(VERSION)
+    SONAMELIBRARYMAJOR ?= libprimme.$(SLIB).$(MAJORVERSION)
+    SOFLAGS ?= -shared -Wl,-soname,$(SONAMELIBRARYMAJOR)
+endif
+LIBRARY = libprimme.a
+SOLIBRARY = libprimme.$(SLIB)
+
+
+# Define compilers and flags
+#---------------------------------------------------------------
+# POSIX systems (e.g., Linux, MinGW, Cygwin)
+#---------------------------------------------------------------
+CC       ?= cc
+F77      ?= gfortran
+FC       ?= gfortran
+DEFINES  ?= -DF77UNDERSCORE 
+CFLAGS   ?= -O -fPIC -DNDEBUG
+FFLAGS   ?= -fno-second-underscore -O
+PRIMME_WITH_HALF ?= no
+ifeq ($(PRIMME_WITH_HALF), yes)
+    CFLAGS += -DPRIMME_WITH_HALF
+endif
+PRIMME_WITH_FLOAT ?= yes
+ifneq ($(PRIMME_WITH_FLOAT), yes)
+    CFLAGS += -DPRIMME_WITHOUT_FLOAT
+endif
+CLANG ?= clang
+
+
+# GPUs compiler flags
+#---------------------------------------------------------------
+# MAGMADIR = /usr/local/magma-2.5.0
+PRIMME_WITH_MAGMA ?= $(if $(findstring undefined,$(origin MAGMADIR)),no,yes)
+# CUDADIR  ?= /usr/local/cuda
+PRIMME_WITH_CUDA ?= $(if $(findstring undefined,$(origin CUDADIR)),no,yes)
+# Set PRIMME_WITH_GPU_PROFILING to yes to track GPU kernels with the invoking PRIMME function
+PRIMME_WITH_GPU_PROFILING ?= no
+ifeq ($(PRIMME_WITH_CUDA), yes)
+    ifeq ($(PRIMME_WITH_MAGMA), yes)
+        override CFLAGS += -I$(MAGMADIR)/include -DPRIMME_WITH_MAGMA
+    endif
+    override CFLAGS += -I$(CUDADIR)/include -DPRIMME_WITH_CUBLAS
+endif
+# ROCMDIR ?= $(shell hipconfig -R)
+PRIMME_WITH_HIPBLAS ?= $(if $(findstring undefined,$(origin ROCMDIR)),no,yes)
+ifeq ($(PRIMME_WITH_HIPBLAS), yes)
+    override CFLAGS += $(shell hipconfig -C) -I$(ROCMDIR)/include -DPRIMME_WITH_HIPBLAS
+endif
+ifeq ($(PRIMME_WITH_GPU_PROFILING), yes)
+    override CFLAGS += -DPRIMME_PROFILE_NV
+endif
+
+#---------------------------------------------------------------
+# IBM architectures
+#CC       = xlc
+#F77      = xlf
+#DEFINES  = -DF77UNDERSCORE
+#CFLAGS   = -O2
+#FFLAGS   = -O2
+#---------------------------------------------------------------
+# Mac OS X
+#CC       = clang
+#F77      = gfortran
+#DEFINES  = -DF77UNDERSCORE 
+#CFLAGS   = -O2
+#FFLAGS   = -fno-second-underscore -O2
+#---------------------------------------------------------------
+# Using Intel compilers
+#CC       = icc
+#F77      = ifort
+#DEFINES  = -DF77UNDERSCORE
+#CFLAGS   = -O2
+#FFLAGS   = -O2
+#---------------------------------------------------------------
+
+
+#---------------------------------------------------------------
+# Uncomment this when building MATLAB interface (but not for Octave)
+# CFLAGS += -DPRIMME_BLASINT_SIZE=64 -fPIC
+#---------------------------------------------------------------
+
+#---------------------------------------------------------------
+#  Creating the library and packages
+#---------------------------------------------------------------
+
+RANLIB ?= ranlib
+R ?= R
+PYTHON ?= $(if $(findstring 1984, $(shell python -c 'print(1984)')), \
+  python, \
+  $(if $(findstring 1984, $(shell python2 -c 'print(1984)')),python2,python3))
+INSTALL_NAME_TOOL ?= /usr/bin/install_name_tool
+
+#---------------------------------------------------------------
+#  Installation
+#---------------------------------------------------------------
+
+includedir ?= $(DESTDIR)$(PREFIX)/include
+libdir ?= $(DESTDIR)$(PREFIX)/lib

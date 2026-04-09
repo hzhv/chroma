@@ -1,0 +1,414 @@
+<?xml version="1.0"?>
+
+
+<t_leapfrog>
+  <mesE>
+    <mesKE>
+      <KE>40.5056490989032</KE>
+    </mesKE>
+    <mesPE>
+      <num_terms>1</num_terms>
+      <PEByMonomials>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <S>-25.7937046981434</S>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </PEByMonomials>
+    </mesPE>
+  </mesE>
+  <leapP>
+    <dt>0.025</dt>
+    <dt_actual_per_dir>0.025 0.025 0.025 0.025</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1536.58168125929</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1543.04319532797</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1553.21490454055</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1565.3019818828</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1577.62746853739</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1589.05089553942</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1598.96824016053</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1607.1856179518</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1614.00921405781</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1620.6785125865</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1630.00245829154</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1646.79395593636</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1677.38203092896</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1727.46834399718</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1798.68365583401</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1886.08705433809</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>1979.40750490582</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>2067.14637675436</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>2139.36819793691</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>2190.80828332342</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <leapQ>
+    <dt>0.05</dt>
+    <dt_actual_per_dir>0.05 0.05 0.05 0.05</dt_actual_per_dir>
+  </leapQ>
+  <leapP>
+    <dt>0.025</dt>
+    <dt_actual_per_dir>0.025 0.025 0.025 0.025</dt_actual_per_dir>
+    <AbsHamiltonianForce>
+      <num_terms>1</num_terms>
+      <ForcesByMonomial>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <F_sq>2222.99935765947</F_sq>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </ForcesByMonomial>
+    </AbsHamiltonianForce>
+  </leapP>
+  <mesE>
+    <mesKE>
+      <KE>451.308422577505</KE>
+    </mesKE>
+    <mesPE>
+      <num_terms>1</num_terms>
+      <PEByMonomials>
+        <elem>
+          <FixedRandomFermMonomial4D>
+            <S>-437.016252103911</S>
+          </FixedRandomFermMonomial4D>
+        </elem>
+      </PEByMonomials>
+    </mesPE>
+  </mesE>
+  <DeltaE>
+    <DeltaKE>410.802773478602</DeltaKE>
+    <DeltaPE>-411.222547405767</DeltaPE>
+    <DeltaH>-0.419773927165409</DeltaH>
+  </DeltaE>
+</t_leapfrog>

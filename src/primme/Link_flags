@@ -1,0 +1,97 @@
+#---------------------------------------------------------------
+#             LINKING FLAGS FOR THE TEST PROGRAMS
+# 	      in ZTEST and DTEST test directories
+#     Linking primme, BLAS/LAPACK for various architectures. 
+#        Makefiles in TEST must also include Make_flags
+#---------------------------------------------------------------
+
+#---------------------------------------------------------------
+# Loaders
+#---------------------------------------------------------------
+CLDR ?= $(CC)
+FLDR ?= $(F77)
+
+#---------------------------------------------------------------
+#  Basic Link flags for LAPACK/BLAS and math
+#---------------------------------------------------------------
+# Debian, Ubuntu, SuSE Linux (>= 13.2), Darwin
+#
+UNAME := $(shell uname)
+# Defaults for FreeBSD for LAPACK installed from package
+LDFLAGS ?= $(if $(findstring FreeBSD,$(UNAME)),-L/usr/local/lib -L/usr/local/lib/gcc7,)
+ifeq ($(origin LIBS), undefined)
+    ifeq ($(PRIMME_WITH_MAGMA),yes)
+         LIBS += -L$(MAGMADIR)/lib -lmagma_sparse -lmagma  \
+                 -L$(CUDADIR)/lib64 -lcublas -lcudart -lcusparse -lstdc++
+    endif
+    ifeq ($(PRIMME_WITH_CUDA),yes)
+         LIBS += -L$(CUDADIR)/lib64 -lcusparse -lcublas -lcudart
+    endif
+    ifeq ($(PRIMME_WITH_HIPBLAS),yes)
+         LIBS += -L$(ROCMDIR)/lib -lhipsparse -lhipblas -lamdhip64
+         ifeq ($(PRIMME_WITH_GPU_PROFILING), yes)
+            LIBS += -lroctx64
+         endif
+    endif
+    ifndef MKLROOT
+        LIBS += -llapack -lblas -lm
+        ifneq (,$(findstring PGI,$(shell $(CC) --version)))
+            LIBS += -pgf90libs
+        else
+            ifneq ($(UNAME), Darwin)
+                LIBS += -lgfortran
+            endif
+        endif
+    else
+        ifneq (,$(findstring icc,$(shell $(CC) --version)))
+            LIBS += -mkl
+        else
+            LIBS += -L${MKLROOT}/lib/intel64 -lmkl_rt -lpthread -lm -ldl
+        endif
+    endif
+endif
+
+#---------------------------------------------------------------
+# SuSE Linux (<= 13.1), Centos
+#
+# LDFLAGS =
+# LIBS = -lm -llapack -lblas -lgfortran -lg2c
+#---------------------------------------------------------------
+# IBM architectures
+#
+# LDFLAGS =
+# LIBS = -lessl -lm           # using ESSL
+#                                      # using BLAS/LAPACK
+# LIBS = -llapack -lblas -lxlf90 -lxl -lxlfmath -lm
+#---------------------------------------------------------------
+# Mac OS X
+#
+# LDFLAGS = -Wl,-framework -Wl,vecLib -m64        # Mac OS X 10.0
+# LDFLAGS = -Wl,-framework -Wl,Accelerate -m64    # Mac OS X 10.3
+# LIBS = -lm
+#---------------------------------------------------------------
+# Using Intel compilers
+#
+# LIBS = -mkl
+#---------------------------------------------------------------
+# Sun Solaris, SunOS 5.9  using sunperf math library
+#
+# LDFLAGS = 
+# LIBS = -lm -lrt -xlic_lib=sunperf
+#---------------------------------------------------------------
+# Cray
+#
+# LDFLAGS = -framework Accelerate
+# LIBS = -lm -llapack -lblas
+#---------------------------------------------------------------
+# Using ACML for lapack/blas
+#
+# LDFLAGS =
+# LIBS = -lm -L/usr/local/acml-3.5.0/gnu64/lib/ -lacml -lacml_mv
+# LIBS = -lm -L/usr/local/acml-3.5.0/gnu64/lib/ -lacml -lacml_mv -lg2c
+#---------------------------------------------------------------
+
+#---------------------------------------------------------------
+# Link any other sequential or parallel libraries 
+# in the test makefiles
+#---------------------------------------------------------------

@@ -1,0 +1,130 @@
+/*! \file
+ *  \brief Propagator solver for a generic non-preconditioned fermion operator
+ *
+ *  Solve for the propagator of a generic non-preconditioned fermion operator
+ */
+
+#include "fermact.h"
+#include "actions/ferm/invert/invcg2.h"
+
+
+namespace Chroma 
+{ 
+  //! Propagator of a generic non-preconditioned fermion linear operator
+  /*! \ingroup qprop
+   *
+   * This routine is actually generic to all non-preconditioned (not red/black) fermions
+   *
+   * Compute the lattice fermion for a generic non-red/black fermion
+   * using the source in "chi" - so, the source can
+   * be of any desired form. The result will appear in "psi", which on input
+   * contains an initial guess for the solution.
+   */
+  template<typename T>
+  class FermActQprop : public SystemSolver<T>
+  {
+  public:
+    //! Constructor
+    /*!
+     * \param A_         Linear operator ( Read )
+     * \param invParam_  inverter parameters ( Read )
+     */
+    FermActQprop(Handle< LinearOperator<T> > A_,
+		 Handle< SystemSolver<T> > invA_) : A(A_), invA(invA_) 
+    {}
+
+    //! Destructor is automatic
+    ~FermActQprop() {}
+
+    //! Return the subset on which the operator acts
+    const Subset& subset() const {return all;}
+
+    //! Solver the linear system
+    /*!
+     * \param psi      quark propagator ( Modify )
+     * \param chi      source ( Read )
+     * \return number of CG iterations
+     */
+    SystemSolverResults_t operator() (T& psi, const T& chi) const
+    {
+      START_CODE();
+
+      // Call inverter -- convention: invA will return res ( || r ||/ || b || )
+      SystemSolverResults_t res = (*invA)(psi, chi);
+ 			
+			// For some reason chroma convention is for Qprop to return || r || (absolute)
+			// So we multiply res.resid * sqrt(norm(chi));
+			res.resid *= sqrt(norm2(chi));
+
+      END_CODE();
+
+      return res;
+    }
+
+		std::vector<SystemSolverResults_t> operator() (const std::vector<std::shared_ptr<T>>& psis, 
+																									 const std::vector<std::shared_ptr<const T>>& chis) const override
+    {
+      START_CODE();
+
+      assert(psis.size() == chis.size());
+
+      // Call inverter - convention  returns residuum
+      std::vector<SystemSolverResults_t> res = (*invA)(psis, chis);
+
+      // for some reason chroma convention is for Qprop to return || r || (absolute)
+			// we can obtaint his by multiplying || r || / || b || by || b ||.
+      for (int col=0; col< psis.size(); ++col) {
+  		  res[col].resid *= sqrt(norm2(*(chis[col])));
+      }
+
+      END_CODE();
+      return res;
+    }
+ 
+  private:
+    // Hide default constructor
+    FermActQprop() {}
+
+    Handle< LinearOperator<T> > A;
+    Handle< SystemSolver<T> > invA;
+  };
+
+
+  /*! \ingroup qprop */
+  template<>
+  SystemSolver<LatticeFermion>*
+  FermAct4D<LatticeFermion,
+	    multi1d<LatticeColorMatrix>,
+	    multi1d<LatticeColorMatrix> >::qprop(Handle< FermState<LatticeFermion, 
+						 multi1d<LatticeColorMatrix>,
+						 multi1d<LatticeColorMatrix> > > state,
+						 const GroupXML_t& invParam) const
+  {
+    // Typedefs to save typing
+    typedef LatticeFermion               T;
+
+    return new FermActQprop<T>(linOp(state),
+			       invLinOp(state,invParam));
+  }
+
+
+  /*! \ingroup qprop */
+  template<>
+  SystemSolver<LatticeStaggeredFermion>* 
+  FermAct4D<LatticeStaggeredFermion,
+	    multi1d<LatticeColorMatrix>,
+	    multi1d<LatticeColorMatrix> >::qprop(Handle< FermState< LatticeStaggeredFermion,
+						 multi1d<LatticeColorMatrix>,
+						 multi1d<LatticeColorMatrix> > > state,
+						 const GroupXML_t& invParam) const
+  {
+    // Typedefs to save typing
+    typedef LatticeStaggeredFermion      T;
+
+    return new FermActQprop<T>(linOp(state),
+			       invLinOp(state,invParam));
+  }
+
+
+} // namespace Chroma
+

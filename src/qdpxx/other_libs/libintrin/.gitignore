@@ -1,0 +1,8 @@
+aclocal.m4
+configure
+examples/Makefile.in
+include/Makefile.in
+lib/Makefile.in
+Makefile.in
+autom4te.cache
+

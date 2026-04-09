@@ -577,11 +577,11 @@ namespace Chroma
       r.copyTo(r0);
 
       // Do the iterations
-      auto normr = normr0.clone();	 ///< residual norms
-      unsigned int it = 0;		 ///< iteration number
-      double max_tol = HUGE_VAL;	 ///< maximum residual norm
-      unsigned int residual_updates = 0; ///< number of residual updates
-      auto p = r0.clone();		 ///< p0 = r0
+      auto normr = normr0.clone();			///< residual norms
+      unsigned int it = 0;				///< iteration number
+      double max_tol = HUGE_VAL;			///< maximum residual norm
+      unsigned int residual_updates = 0;		///< number of residual updates
+      auto p = r0.clone();				///< p0 = r0
       auto rho = contract<1>(r, r0.conj(), order_rows); // rho = r0' * r
       auto Kp = prec ? r0.make_compatible() : p;
       auto AKp = r0.make_compatible();
@@ -750,32 +750,32 @@ namespace Chroma
 
       // TODO: add optimizations for multiple operators
       if (op.order_t.size() > 0)
-		throw std::runtime_error("Not implemented");
+	throw std::runtime_error("Not implemented");
 
       // Check options
       if (max_its == 0 && tol <= 0)
-		throw std::runtime_error("mr: please give a stopping criterion, either a tolerance or "
-					"a maximum number of iterations");
+	throw std::runtime_error("mr: please give a stopping criterion, either a tolerance or "
+				 "a maximum number of iterations");
       if (max_its == 0)
-		max_its = std::numeric_limits<unsigned int>::max();
+	max_its = std::numeric_limits<unsigned int>::max();
       if (max_residual_updates == 0)
-		max_residual_updates = (std::is_same<COMPLEX, double>::value ||
+	max_residual_updates = (std::is_same<COMPLEX, double>::value ||
 				std::is_same<COMPLEX, std::complex<double>>::value)
 				 ? 100
-				 : 100;  // ???
+				 : 100; // ???
 
       // Check that the operator is compatible with the input and output vectors
       if (!op.d.is_compatible(x) || !op.d.is_compatible(y))
-		throw std::runtime_error(
-		"mr: Either the input or the output vector isn't compatible with the "
-		"operator");
+	throw std::runtime_error(
+	  "mr: Either the input or the output vector isn't compatible with the "
+	  "operator");
 
       // Get an unused label for the search subspace columns
       std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
       std::string order_rows = detail::remove_dimensions(op.d.order, op.order_t);
       std::size_t num_cols = x.volume(order_cols);
       if (num_cols == 0)
-		return;
+	return;
 
       // Counting op applications
       unsigned int nops = 0, nprecs = 0;
@@ -784,14 +784,14 @@ namespace Chroma
       Tensor<NOp + 1, COMPLEX> r;
       if (passing_initial_guess)
       {
-		r = op(y).scale(-1);
-		nops += num_cols;
+	r = op(y).scale(-1);
+	nops += num_cols;
       }
       else
       {
-		r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim());
-		r.set_zero();
-		y.set_zero();
+	r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim());
+	r.set_zero();
+	y.set_zero();
       }
       x.addTo(r);
       auto normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
@@ -893,10 +893,9 @@ namespace Chroma
 		    << " precs: " << nprecs << std::endl;
     }
 
-
-    /// Solve iteratively op * y = x 
-	/// using Jacobi Method (valid for diag dominant linear systems that spectrum radius < 1)
-	/// \param op: problem matrix
+    /// Solve iteratively op * y = x
+    /// using Jacobi Method (valid for diag dominant linear systems that spectrum radius < 1)
+    /// \param op: problem matrix
     /// \param x: input right-hand-sides
     /// \param y: the solution vectors
     /// \param tol: maximum tolerance
@@ -906,122 +905,126 @@ namespace Chroma
     /// \param passing_initial_guess: whether `y` contains a solution guess
     /// \param verb: verbosity level
     /// \param prefix: prefix printed before every line
-	///
-	/// Method (Residual Form):
-	/// r = b - A * x  // compute initial residual
-	/// while not converge:
-	///   x_new = x + D^{-1}r
-	///   r = b - A * x_new
-	/// end
-	/// 
-	/// A = L + D + U
-	/// Ax = b => (L + D + U)x = b  => Lx + Dx + Ux = b => Dx = b-Lx-Ux => Dx = b-(L+U)x
-	/// x_new = x + D^{-1}(b - Ax) => x_new = x + D^{-1}(b - Lx - Ux - Dx) = x + D^{-1}b - D^{-1}Lx - D^{-1}Ux - D^{-1}Dx
-	/// x_new = D^{-1}b - D^{-1}(L+U)x 
-	///
-	/// while not converge:
-	///   T = -D^{-1}(L+U)
-	///   C = D^{-1}b
-	///   x_new = T x + C
-	/// end
+    ///
+    /// Method (Residual Form):
+    /// r = b - A * x  // compute initial residual
+    /// while not converge:
+    ///   x_new = x + D^{-1}r
+    ///   r = b - A * x_new
+    /// end
+    ///
+    /// A = L + D + U
+    /// Ax = b => (L + D + U)x = b  => Lx + Dx + Ux = b => Dx = b-Lx-Ux => Dx = b-(L+U)x
+    /// x_new = x + D^{-1}(b - Ax) => x_new = x + D^{-1}(b - Lx - Ux - Dx) = x + D^{-1}b - D^{-1}Lx - D^{-1}Ux - D^{-1}Dx
+    /// x_new = D^{-1}b - D^{-1}(L+U)x
+    ///
+    /// while not converge:
+    ///   T = -D^{-1}(L+U)
+    ///   C = D^{-1}b
+    ///   x_new = T x + C
+    /// end
 
-	template <std::size_t NOp, typename COMPLEX>
-	void jacobi(const Operator<NOp, COMPLEX>& op,
-				const Tensor<NOp + 2, COMPLEX>& opDiag,                   
-				const std::string& blk_rows, const std::string& blk_cols, /* blk_cols represent label for the input */
-				const remap& m_blk, /* input label => output label */
-			
-				const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX>& y, double tol,
-				unsigned int max_its = 0, bool error_if_not_converged = true,
-				Verbosity verb = NoOutput, std::string prefix = "")
-	{
-		detail::log(1, prefix + " starting jacobi method");
+    template <std::size_t NOp, typename COMPLEX>
+    void jacobi(const Operator<NOp, COMPLEX>& op, const Tensor<NOp + 2, COMPLEX>& opDiag,
+		const std::string& blk_rows,
+		const std::string& blk_cols, /* blk_cols represent label for the input */
+		const remap& m_blk,	     /* input label => output label */
+
+		const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX>& y, double tol,
+		unsigned int max_its = 0, bool error_if_not_converged = true,
+		Verbosity verb = NoOutput, std::string prefix = "")
+    {
+      detail::log(1, prefix + " starting jacobi method");
 
       if (op.order_t.size() > 0)
-		throw std::runtime_error("Not implemented");
+	throw std::runtime_error("Not implemented");
 
       // Check options
       if (max_its == 0 && tol <= 0)
-		throw std::runtime_error("jocabi: please give a stopping criterion, either a tolerance or "
-					"a maximum number of iterations");
+	throw std::runtime_error("jocabi: please give a stopping criterion, either a tolerance or "
+				 "a maximum number of iterations");
       if (max_its == 0)
-		max_its = std::numeric_limits<unsigned int>::max(); 
+	max_its = std::numeric_limits<unsigned int>::max();
 
       // Check that the operator is compatible with the input and output vectors
-      if (!op.d.is_compatible(x) || !op.d.is_compatible(y))  
-		throw std::runtime_error(
-		"jocabi: Either the input or the output vector isn't compatible with the "
-		"operator");
+      if (!op.d.is_compatible(x) || !op.d.is_compatible(y))
+	throw std::runtime_error(
+	  "jocabi: Either the input or the output vector isn't compatible with the "
+	  "operator");
 
-      // Get an unused label for the search subspace columns                
-      std::string order_cols = detail::remove_dimensions(x.order, op.i.order);   // x removes the rows that matches op and remains cols
+      // Get an unused label for the search subspace columns
+      std::string order_cols = detail::remove_dimensions(
+	x.order, op.i.order); // x removes the rows that matches op and remains cols
       std::string order_rows = detail::remove_dimensions(op.d.order, op.order_t);
-      std::size_t num_cols = x.volume(order_cols); // length of the column demension volumn(nN): n=10, N=2, volumn=20
+      std::size_t num_cols =
+	x.volume(order_cols); // length of the column demension volumn(nN): n=10, N=2, volumn=20
       if (num_cols == 0)
-		return;
+	return;
 
       // Counting op applications
       unsigned int nops = 0;
 
       // Compute FIRST residual, r = x - op * y = x
       Tensor<NOp + 1, COMPLEX> r;
-      r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim()); // only when specify templete args when invokation
-	                                                                       // now r can do matvec by op(r)
-																		   // x.kvdim() return all of the demensions
-	  r.set_zero();
-	  y.set_zero();
-      
+      r = op.template make_compatible_img<NOp + 1>(
+	order_cols, x.kvdim()); // only when specify templete args when invokation
+				// now r can do matvec by op(r)
+				// x.kvdim() return all of the demensions
+      r.set_zero();
+      y.set_zero();
+
       x.addTo(r); // r = x + r
 
       auto normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
       if (max(normr0) == 0)
-		return;
+	return;
 
-	  // Start the iteration
-  	  unsigned int it = 0;
-  	  double max_tol = HUGE_VAL;
-	
-      auto p = r.make_compatible();	///< p will hold D^{-1} * r
+      // Start the iteration
+      unsigned int it = 0;
+      double max_tol = HUGE_VAL;
+
+      auto p = r.make_compatible(); ///< p will hold D^{-1} * r
 
       for (it = 0; it < max_its;)
       {
-		// D^{-1} * r
-		solve<2, NOp + 1, NOp + 2, NOp + 1, COMPLEX>(
-        	opDiag, blk_rows, blk_cols, r.rename_dims(m_blk), blk_cols, CopyTo, p);
-		// y = y + p
-		p.addTo(y);
-	    // r = x - op * y, less numerical errors?
-	    // r = op(y).scale(-1);
-		op(y).scale(-1).copyTo(r); // copy into r
-		nops += num_cols;
-		x.addTo(r);
-		
-		auto normr = norm<1>(r, op.order_t + order_cols);
-		max_tol = max(div(normr, normr0));
+	// D^{-1} * r
+	solve<2, NOp + 1, NOp + 2, NOp + 1, COMPLEX>(opDiag, blk_rows, blk_cols,
+						     r.rename_dims(m_blk), blk_cols, CopyTo, p);
+	// y = y + p
+	p.addTo(y);
+	// r = x - op * y, less numerical errors?
+	// r = op(y).scale(-1);
+	op(y).scale(-1).copyTo(r); // copy into r
+	nops += num_cols;
+	x.addTo(r);
 
-		if (verb >= Detailed)
-		  QDPIO::cout << prefix << " JACOBI iteration #its.: " << it
-					  << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
+	auto normr = norm<1>(r, op.order_t + order_cols);
+	max_tol = max(div(normr, normr0));
 
-		++it;
-		if (max_tol <= tol) break;
-	  }
+	if (verb >= Detailed)
+	  QDPIO::cout << prefix << " JACOBI iteration #its.: " << it
+		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
 
-	  if (error_if_not_converged) { // last round of rel residual
-	    op(y, r); // r = A*y
-		x.scale(-1).addTo(r); // r = -x + r
-		auto normr = norm<1>(r, op.order_t + order_cols);
-		max_tol = max(div(normr, normr0));
-		if (tol > 0 && max_tol > tol)
-		  throw std::runtime_error("jacobi didn't converge");
-		}
+	++it;
+	if (max_tol <= tol)
+	  break;
+      }
 
-		if (verb >= JustSummary)
-		  QDPIO::cout << prefix << " JACOBI summary #its.: " << it
-						<< " max rel. residual: " << detail::tostr(max_tol, 2) 
-						<< " matvecs: " << nops << std::endl;
-	}
+      if (error_if_not_converged)
+      {			      // last round of rel residual
+	op(y, r);	      // r = A*y
+	x.scale(-1).addTo(r); // r = -x + r
+	auto normr = norm<1>(r, op.order_t + order_cols);
+	max_tol = max(div(normr, normr0));
+	if (tol > 0 && max_tol > tol)
+	  throw std::runtime_error("jacobi didn't converge");
+      }
 
+      if (verb >= JustSummary)
+	QDPIO::cout << prefix << " JACOBI summary #its.: " << it
+		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
+		    << std::endl;
+    }
 
     /// Solve iteratively op * y = x using Generalized Conjugate Residual
     /// \param op: problem matrix
@@ -1433,7 +1436,7 @@ namespace Chroma
 		  Tracker _t(std::string("mr ") + prefix);
 		  _t.arity = x.kvdim().at('n');
 		  foreachInChuncks(
-			x, y, max_simultaneous_rhs,
+		    x, y, max_simultaneous_rhs,
 		    [=](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
 		      mr(op, prec, x, y, tol, max_its, error_if_not_converged, max_residual_updates,
 			 false /* no init guess */, verb, prefix);
@@ -1558,51 +1561,47 @@ namespace Chroma
 	return r;
       }
 
-	/// Returns a Jacobi solver (Jacobi method)
-	/// \param op: operator to make the inverse of
-	/// \param ops: options to select the solver from `solvers` and influence the solver construction
-	template <std::size_t NOp, typename COMPLEX>
-	Operator<NOp, COMPLEX> getJacobiSolver(Operator<NOp, COMPLEX> op, const Options& ops,
-											Operator<NOp, COMPLEX> prec_)
-	{
-		if (prec_)
-		throw std::runtime_error("getJacobiSolver: Jacobi does not support external preconditioner");
+      /// Returns a Jacobi solver (Jacobi method)
+      /// \param op: operator to make the inverse of
+      /// \param ops: options to select the solver from `solvers` and influence the solver construction
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getJacobiSolver(Operator<NOp, COMPLEX> op, const Options& ops,
+					     Operator<NOp, COMPLEX> prec_)
+      {
+	if (prec_)
+	  throw std::runtime_error(
+	    "getJacobiSolver: Jacobi does not support external preconditioner");
 
-		std::string prefix = getOption<std::string>(ops, "prefix", "");
-		Tracker _t(std::string("setup jacobi ") + prefix);
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup jacobi ") + prefix);
 
-		// Get the remainder options.
-		double tol = getOption<double>(ops, "tol", 0.0);
-		unsigned int max_its = getOption<unsigned int>(ops, "max_its", 0);
-		if (max_its == 0 && tol <= 0)
-		ops.throw_error("set either `tol` or `max_its`");
-		bool error_if_not_converged = getOption<bool>(ops, "error_if_not_converged", true);
-		unsigned int max_residual_updates = getOption<unsigned int>(ops, "max_residual_updates", 0);
-		unsigned int max_simultaneous_rhs = getOption<unsigned int>(ops, "max_simultaneous_rhs", 0);
-		Verbosity verb = getOption<Verbosity>(ops, "verbosity", getVerbosityMap(), NoOutput);
-		
-		const std::string blk_rows = "cs"; 
-		remap m_blk = getNewLabels(blk_rows, op.d.order + op.i.order);
-		const std::string blk_cols = update_order(blk_rows, m_blk);
-		
-		Tensor<NOp + 2, COMPLEX> opDiag = getBlockDiag<NOp + 2>(op, blk_rows, m_blk);
+	// Get the remainder options.
+	double tol = getOption<double>(ops, "tol", 0.0);
+	unsigned int max_its = getOption<unsigned int>(ops, "max_its", 0);
+	if (max_its == 0 && tol <= 0)
+	  ops.throw_error("set either `tol` or `max_its`");
+	bool error_if_not_converged = getOption<bool>(ops, "error_if_not_converged", true);
+	unsigned int max_residual_updates = getOption<unsigned int>(ops, "max_residual_updates", 0);
+	unsigned int max_simultaneous_rhs = getOption<unsigned int>(ops, "max_simultaneous_rhs", 0);
+	Verbosity verb = getOption<Verbosity>(ops, "verbosity", getVerbosityMap(), NoOutput);
 
-		// Return the solver.
-		return {
-			[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-			Tracker _t(std::string("jacobi ") + prefix);
-			_t.arity = x.kvdim().at('n');
-			foreachInChuncks(
-			x, y, max_simultaneous_rhs,
-			[=](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
-				jacobi(op, 
-						opDiag, 
-						blk_rows, blk_cols, m_blk,
-						x, y, tol, max_its, error_if_not_converged,
-						verb, prefix);
-						
-			},
-			'n');
+	const std::string blk_rows = "cs";
+	remap m_blk = getNewLabels(blk_rows, op.d.order + op.i.order);
+	const std::string blk_cols = update_order(blk_rows, m_blk);
+
+	Tensor<NOp + 2, COMPLEX> opDiag = getBlockDiag<NOp + 2>(op, blk_rows, m_blk);
+
+	// Return the solver.
+	return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+		  Tracker _t(std::string("jacobi ") + prefix);
+		  _t.arity = x.kvdim().at('n');
+		  foreachInChuncks(
+		    x, y, max_simultaneous_rhs,
+		    [=](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+		      jacobi(op, opDiag, blk_rows, blk_cols, m_blk, x, y, tol, max_its,
+			     error_if_not_converged, verb, prefix);
+		    },
+		    'n');
 		},
 		op.i,
 		op.d,
@@ -1613,12 +1612,12 @@ namespace Chroma
 		DenseOperator(),
 		op.preferred_col_ordering,
 		false /* no Kronecker blocking */};
-		}
-	  
-        enum class SpinSplitting {
-		None,	   // one spin output
-		Chirality, // two spin output
-		Full	   // four spin output (homoiconic coarse operator)
+      }
+
+      enum class SpinSplitting {
+	None,	   // one spin output
+	Chirality, // two spin output
+	Full	   // four spin output (homoiconic coarse operator)
       };
 
       enum class NullVectorsNormalization {
@@ -1791,8 +1790,8 @@ namespace Chroma
 	      // Pre-normalize the vectors if the user asks
 	      if (null_vectors_normalization == NullVectorsNormalization::Full)
 	      {
-		nv_blk0 =
-		  vecnorm<NOp + 1 + 5 - 1>(nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
+		nv_blk0 = vecnorm<NOp + 1 + 5 - 1>(
+		  nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
 	      }
 	      else if (null_vectors_normalization == NullVectorsNormalization::Blocking)
 	      {
@@ -1933,7 +1932,7 @@ namespace Chroma
 	      if (null_vectors_normalization == NullVectorsNormalization::Full)
 	      {
 		nv_blk0 =
-		  vecnorm<NOp + 4 -1>(nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
+		  vecnorm<NOp + 4 - 1>(nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
 	      }
 	      else if (null_vectors_normalization == NullVectorsNormalization::Blocking)
 	      {
@@ -2314,7 +2313,7 @@ namespace Chroma
       /// Returns a general deflation preconditioner
       ///
       /// It returns an approximation of Op^{-1} = Op^{-1}*Q + Op^{-1}(I-Q), where Q is a projector
-      /// on the left singular space of Op. 
+      /// on the left singular space of Op.
       /// The approximation is constructed using an oblique projector and doing the inversions
       /// approximately:
       ///   1) Q = Op*V*(W'*Op*V)^{-1}*W', where W and V are left and right singular spaces.
@@ -2498,51 +2497,51 @@ namespace Chroma
 	Operator<NOp, COMPLEX> opA{
 	  use_Aee_prec ?
 		       // Do opA = I - Op_eo * Op_oo^{-1} * Op_oe * Op_ee^{-1} if use_Aee_prec
-	    OperatorFun<NOp, COMPLEX>(
-	      [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-		foreachInChuncks(
-		  x, y, create_operator_max_rhs,
-		  [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
-		    Tracker _t(std::string("eo matvec Aee_prec ") + prefix);
+	    OperatorFun<NOp, COMPLEX>([=](const Tensor<NOp + 1, COMPLEX>& x,
+					  Tensor<NOp + 1, COMPLEX> y) {
+	      foreachInChuncks(x, y, create_operator_max_rhs,
+			       [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+				 Tracker _t(std::string("eo matvec Aee_prec ") + prefix);
 
-		    // y = x
-		    x.copyTo(y);
+				 // y = x
+				 x.copyTo(y);
 
-		    // y0 = Op_ee^{-1} * x
-		    auto y0 = contract<NOp + 1>(opInvDiagE, x.rename_dims(m_sc), "CS");
+				 // y0 = Op_ee^{-1} * x
+				 auto y0 = contract<NOp + 1>(opInvDiagE, x.rename_dims(m_sc), "CS");
 
-		    // y1 = Op_oe * y0
-		    auto y1 = op_oe(std::move(y0));
+				 // y1 = Op_oe * y0
+				 auto y1 = op_oe(std::move(y0));
 
-		    // y2 = Op_oo^{-1} * y1
-		    auto y2 = contract<NOp + 1>(opInvDiagO, std::move(y1).rename_dims(m_sc), "CS");
+				 // y2 = Op_oo^{-1} * y1
+				 auto y2 = contract<NOp + 1>(opInvDiagO,
+							     std::move(y1).rename_dims(m_sc), "CS");
 
-		    // y += -Op_eo * y2
-		    op_eo(std::move(y2)).scale(-1).addTo(y);
-		  });
-	      })
+				 // y += -Op_eo * y2
+				 op_eo(std::move(y2)).scale(-1).addTo(y);
+			       });
+	    })
 		       :
 		       // Otherwise, do opA = Op_ee - Op_eo * Op_oo^{-1} * Op_oe
-	    OperatorFun<NOp, COMPLEX>(
-	      [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-		foreachInChuncks(x, y, create_operator_max_rhs,
-				 [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
-				   Tracker _t(std::string("eo matvec ") + prefix);
+	    OperatorFun<NOp, COMPLEX>([=](const Tensor<NOp + 1, COMPLEX>& x,
+					  Tensor<NOp + 1, COMPLEX> y) {
+	      foreachInChuncks(x, y, create_operator_max_rhs,
+			       [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+				 Tracker _t(std::string("eo matvec ") + prefix);
 
-				   // y = Op_ee * x
-				   contract(opDiagE, x.rename_dims(m_sc), "CS", CopyTo, y);
+				 // y = Op_ee * x
+				 contract(opDiagE, x.rename_dims(m_sc), "CS", CopyTo, y);
 
-				   // y1 = Op_oe * x
-				   auto y1 = op_oe(x);
+				 // y1 = Op_oe * x
+				 auto y1 = op_oe(x);
 
-				   // y2 = Op_oo^{-1} * y1
-				   auto y2 = contract<NOp + 1>(
-				     opInvDiagO, std::move(y1).rename_dims(m_sc), "CS");
+				 // y2 = Op_oo^{-1} * y1
+				 auto y2 = contract<NOp + 1>(opInvDiagO,
+							     std::move(y1).rename_dims(m_sc), "CS");
 
-				   // y += -Op_eo * y2
-				   op_eo(std::move(y2)).scale(-1).addTo(y);
-				 });
-	      }),
+				 // y += -Op_eo * y2
+				 op_eo(std::move(y2)).scale(-1).addTo(y);
+			       });
+	    }),
 	  op.d.kvslice_from_size({{'X', 0}}, {{'X', 1}}),
 	  op.i.kvslice_from_size({{'X', 0}}, {{'X', 1}}),
 	  nullptr,
@@ -2620,8 +2619,7 @@ namespace Chroma
 	      auto yo0 = be;
 	      x.kvslice_from_size({{'X', 1}}, {{'X', 1}}).copyTo(yo0);
 	      op_oe(ye).scale(-1).addTo(yo0);
-	      contract<NOp + 1>(opInvDiagO,
-				yo0.rename_dims(m_sc), "CS", CopyTo,
+	      contract<NOp + 1>(opInvDiagO, yo0.rename_dims(m_sc), "CS", CopyTo,
 				y.kvslice_from_size({{'X', 1}}, {{'X', 1}}));
 	    }
 	  },
@@ -2757,7 +2755,6 @@ namespace Chroma
 	      .copyTo(y);
 	  },
 	  eg_d, eg_i, nullptr, op};
-
 
 	// Get solver on op_oo
 	const auto solver_oo = getSolver(op_oo, getOptions(ops, "solver_oo"));
@@ -3429,59 +3426,58 @@ namespace Chroma
 	    op.d, op.i, nullptr, op};
 	}
       }
-	  
 
       /// Jacobi preconditioner (alias to block-Jacobi with default blocking)
       template <std::size_t NOp, typename COMPLEX>
       Operator<NOp, COMPLEX> getJacobi(Operator<NOp, COMPLEX> op, const Options& ops,
 				       Operator<NOp, COMPLEX> prec_)
       {
-		if (prec_)
-			throw std::runtime_error("getJacobi: unsupported input preconditioner");
-		std::string prefix = getOption<std::string>(ops, "prefix", "");
-    	Tracker _t(std::string("setup jacobi solver ") + prefix);
+	if (prec_)
+	  throw std::runtime_error("getJacobi: unsupported input preconditioner");
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup jacobi solver ") + prefix);
 
-		// Get the blocking
-		auto dim = op.d.kvdim();
-		std::vector<unsigned int> blocking{1u, 1u, 1u, 1u};
-		// std::vector<unsigned int> blocking =
-		// getOption<std::vector<unsigned int>>(ops, "blocking", default_blocking);
-		if (blocking.size() != Nd)
-		ops.getValue("blocking")
-			.throw_error("getBlocking: the blocking should be a vector with four elements");
-		std::map<char, unsigned int> mblk{
-		{'x', blocking[0]}, {'y', blocking[1]}, {'z', blocking[2]}, {'t', blocking[3]}};
-		
-		// Get the block diagonal of the operator with rows cs and columns CS
-		const std::string blk_rows = "cs"; // order of the block of rows to invert
-		remap m_blk = getNewLabels(blk_rows, op.d.order + op.i.order); // column labels
-		const std::string blk_cols =
-			update_order(blk_rows, m_blk); // order of the block of columns to invert
-		Tensor<NOp + 2, COMPLEX> opDiag = getBlockDiag<NOp + 2>(op, blk_rows, m_blk);
+	// Get the blocking
+	auto dim = op.d.kvdim();
+	std::vector<unsigned int> blocking{1u, 1u, 1u, 1u};
+	// std::vector<unsigned int> blocking =
+	// getOption<std::vector<unsigned int>>(ops, "blocking", default_blocking);
+	if (blocking.size() != Nd)
+	  ops.getValue("blocking")
+	    .throw_error("getBlocking: the blocking should be a vector with four elements");
+	std::map<char, unsigned int> mblk{
+	  {'x', blocking[0]}, {'y', blocking[1]}, {'z', blocking[2]}, {'t', blocking[3]}};
 
-		// Return the solver
-		return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-				// y = Op_diag^{-1} * x
-				solve<2, NOp + 1, NOp + 2, NOp + 1, COMPLEX>(
-				opDiag, blk_rows, blk_cols, x.rename_dims(m_blk), blk_cols, CopyTo, y);
-			},
-			op.d, op.i, nullptr, op};
+	// Get the block diagonal of the operator with rows cs and columns CS
+	const std::string blk_rows = "cs"; // order of the block of rows to invert
+	remap m_blk = getNewLabels(blk_rows, op.d.order + op.i.order); // column labels
+	const std::string blk_cols =
+	  update_order(blk_rows, m_blk); // order of the block of columns to invert
+	Tensor<NOp + 2, COMPLEX> opDiag = getBlockDiag<NOp + 2>(op, blk_rows, m_blk);
+
+	// Return the solver
+	return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+		  // y = Op_diag^{-1} * x
+		  solve<2, NOp + 1, NOp + 2, NOp + 1, COMPLEX>(
+		    opDiag, blk_rows, blk_cols, x.rename_dims(m_blk), blk_cols, CopyTo, y);
+		},
+		op.d, op.i, nullptr, op};
       }
 
-	      template <std::size_t NOp, typename COMPLEX>
-	      Operator<NOp, COMPLEX> ilu0(Operator<NOp, COMPLEX> op, const Options& ops);
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> ilu0(Operator<NOp, COMPLEX> op, const Options& ops);
 
       template <std::size_t NOp, typename COMPLEX>
       Operator<NOp, COMPLEX> getILU0(Operator<NOp, COMPLEX> op, const Options& ops,
 				     Operator<NOp, COMPLEX> prec_)
       {
-		if (prec_)
-		throw std::runtime_error("getILU0: unsupported input preconditioner");
-		return ilu0(op, ops);
+	if (prec_)
+	  throw std::runtime_error("getILU0: unsupported input preconditioner");
+	return ilu0(op, ops);
       }
-    
-    /// Returns a block CSR ILU(0) preconditioner
-	/*
+
+      /// Returns a block CSR ILU(0) preconditioner
+      /*
 	function [l,u] = ilu0_colors(a, p, bs)
 	%% implictly ilu0(A-colored)
 		% [a00 a01] = [l00 0  ] [u00 u01] = [l00*u00  l00*u01        ]
@@ -3525,614 +3521,612 @@ namespace Chroma
 		end
 	end
 	*/
-    /// \param op: operator to precondition (must be square)
-    template <std::size_t NOp, typename COMPLEX>
-    Operator<NOp, COMPLEX> ilu0(Operator<NOp, COMPLEX> op, const Options& ops)
-    {
-	  std::string prefix = getOption<std::string>(ops, "prefix", "");
-	  Tracker _t(std::string("setup ILU0 solver ") + prefix);
-
-      if (!op.d.is_compatible(op.i))
-		throw std::runtime_error("ILU0: only square operators are supported");
-
-      // Work on local data only. ilu(0) intentionally approximates only
-      //  the rank-local matrix extracted from the sparse operator.
-      auto t = cloneOperatorToSpTensor(op, getFurthestNeighborDistance(op), RowMajor, false,
-				       std::string("ILU0 ") + prefix);
-      auto sp = t.first; // block csr format	  
-
-      if (!sp)
-		throw std::runtime_error("ILU0: empty sparse operator");
-      if (sp.isImgFastInBlock)
-		throw std::runtime_error("ILU0: unsupported sparse format with fast image in block");
-	  
-	  // Local block-CSR extraction from SpTensor
-      // Force local host-side access: this ILU0 path is intentionally sequential.
-      auto sp_local = sp.getLocal();
-      auto ii_host = sp_local.ii.make_sure(none, OnHost).getLocal();
-      auto jj_host = sp_local.jj.make_sure(none, OnHost).getLocal();
-      auto data_host = sp_local.data.make_sure(none, OnHost).getLocal();
-	  
-	  const std::string col_labels(sp_local.d.order.begin(),
-				   sp_local.d.order.begin() + sp_local.nblockd + sp_local.nkrond);
-      const std::string row_labels(sp_local.i.order.begin(),
-				   sp_local.i.order.begin() + sp_local.nblocki + sp_local.nkroni);
-      
-      // Dense block size inside each BSR nonzero (product of blocked image dimensions).
-      std::size_t bs = 1;
-      for (char c : row_labels)
-		bs *= (std::size_t)sp_local.i.kvdim().at(c);
-      if (bs == 0 || bs != (std::size_t)volume(sp_local.d.kvdim(), col_labels))
-		throw std::runtime_error("ILU0: unsupported block shape");
-
-      const auto& row_size = detail::to_kv(sp_local.i.order, sp_local.blki);
-      const auto row_strides =
-		superbblas::detail::get_strides<Index>(ii_host.size, superbblas::FastToSlow);
-      const int* ii_ptr = ii_host.data();
-      const Coor<NOp>* jj_ptr = reinterpret_cast<const Coor<NOp>*>(jj_host.data());
-      auto x_pos = sp_local.i.order.find('X');
-      bool explicit_two_color =
-	x_pos != std::string::npos && sp_local.i.kvdim().count('X') == 1 &&
-	sp_local.i.kvdim().at('X') == 2 && detail::isEvenOddLayout(op.imgLayout) &&
-	detail::isEvenOddLayout(op.domLayout);
-
-      struct RowBlock {
-		int col = -1;
-		std::vector<COMPLEX> data;
-      };
-
-      // Compact factor storage for the explicit 2-color factorization:
-      //   L = [ I   0 ]
-      //       [L10  I ]
-      //   U = [U00 U01]
-      //       [ 0  U11]
-      struct ILUBlockData {
-		std::size_t nrows = 0;
-		std::size_t bs = 0;
-		bool use_two_color = false;
-		std::vector<Coor<NOp>> row_coors;
-		std::vector<Coor<NOp>> dense_coors;
-		std::vector<int> rows0;
-		std::vector<int> rows1;
-		std::vector<std::vector<RowBlock>> U01;
-		std::vector<std::vector<RowBlock>> L10;
-		std::vector<std::vector<RowBlock>> Lrows;
-		std::vector<std::vector<RowBlock>> Urows;
-		std::vector<std::vector<COMPLEX>> UdiagInv;
-      };
-      auto ilu = std::make_shared<ILUBlockData>();
-      ilu->nrows = ii_host.volume();
-      ilu->bs = bs;
-      ilu->row_coors.resize(ilu->nrows);
-      ilu->dense_coors.resize(bs);
-      ilu->U01.resize(ilu->nrows);
-      ilu->L10.resize(ilu->nrows);
-      ilu->Lrows.resize(ilu->nrows);
-      ilu->Urows.resize(ilu->nrows);
-      ilu->UdiagInv.assign(ilu->nrows, std::vector<COMPLEX>(bs * bs, COMPLEX{}));
-
-      auto color_of = [&](std::size_t row) {
-	return x_pos == std::string::npos ? -1 : ilu->row_coors[row][x_pos];
-      };
-      auto mat_mul_into = [&](const std::vector<COMPLEX>& A, const std::vector<COMPLEX>& B,
-			      std::vector<COMPLEX>& C) {
-	C.assign(bs * bs, COMPLEX{});
-	for (std::size_t i = 0; i < bs; ++i)
-	  for (std::size_t k = 0; k < bs; ++k)
-	  {
-	    COMPLEX aik = A[i * bs + k];
-	    for (std::size_t j = 0; j < bs; ++j)
-	      C[i * bs + j] += aik * B[k * bs + j];
-	  }
-      };
-      auto mat_submul = [&](std::vector<COMPLEX>& C, const std::vector<COMPLEX>& A,
-			    const std::vector<COMPLEX>& B) {
-	for (std::size_t i = 0; i < bs; ++i)
-	  for (std::size_t k = 0; k < bs; ++k)
-	  {
-	    COMPLEX aik = A[i * bs + k];
-	    for (std::size_t j = 0; j < bs; ++j)
-	      C[i * bs + j] -= aik * B[k * bs + j];
-	  }
-      };
-      auto finite_block = [&](const std::vector<COMPLEX>& block) {
-	for (const auto& v : block)
-	  if (!std::isfinite(std::real(v)) || !std::isfinite(std::imag(v)))
-	    return false;
-	return true;
-      };
-
-      std::array<unsigned int, NOp> img_to_dom_pos{};
-      for (unsigned int p = 0; p < NOp; ++p)
+      /// \param op: operator to precondition (must be square)
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> ilu0(Operator<NOp, COMPLEX> op, const Options& ops)
       {
-	char img_label = sp_local.i.order[p];
-	char dom_label = t.second.at(img_label);
-	auto pos = sp_local.d.order.find(dom_label);
-	if (pos == std::string::npos)
-	  throw std::runtime_error("ILU0: failed to map image labels into domain labels");
-	img_to_dom_pos[p] = (unsigned int)pos;
-      }
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup ILU0 solver ") + prefix);
 
-      // Cache the coordinates of the entries inside each dense block so the apply path
-      // can rebuild local memory offsets without decoding the block structure every time.
-      for (std::size_t b = 0; b < ilu->bs; ++b)
-      {
-	Coor<NOp> block_coor{{}};
-	int t = (int)b;
+	if (!op.d.is_compatible(op.i))
+	  throw std::runtime_error("ILU0: only square operators are supported");
+
+	// Work on local data only. ilu(0) intentionally approximates only
+	//  the rank-local matrix extracted from the sparse operator.
+	auto t = cloneOperatorToSpTensor(op, getFurthestNeighborDistance(op), RowMajor, false,
+					 std::string("ILU0 ") + prefix);
+	auto sp = t.first; // block csr format
+
+	if (!sp)
+	  throw std::runtime_error("ILU0: empty sparse operator");
+	if (sp.isImgFastInBlock)
+	  throw std::runtime_error("ILU0: unsupported sparse format with fast image in block");
+
+	// Local block-CSR extraction from SpTensor
+	// Force local host-side access: this ILU0 path is intentionally sequential.
+	auto sp_local = sp.getLocal();
+	auto ii_host = sp_local.ii.make_sure(none, OnHost).getLocal();
+	auto jj_host = sp_local.jj.make_sure(none, OnHost).getLocal();
+	auto data_host = sp_local.data.make_sure(none, OnHost).getLocal();
+
+	const std::string col_labels(sp_local.d.order.begin(),
+				     sp_local.d.order.begin() + sp_local.nblockd + sp_local.nkrond);
+	const std::string row_labels(sp_local.i.order.begin(),
+				     sp_local.i.order.begin() + sp_local.nblocki + sp_local.nkroni);
+
+	// Dense block size inside each BSR nonzero (product of blocked image dimensions).
+	std::size_t bs = 1;
 	for (char c : row_labels)
-	{
-	  int s = sp_local.i.kvdim().at(c);
-	  int v = t % s;
-	  t /= s;
-	  unsigned int p = (unsigned int)sp_local.i.order.find(c);
-	  block_coor[p] = v;
-	}
-	ilu->dense_coors[b] = block_coor;
-      }
+	  bs *= (std::size_t)sp_local.i.kvdim().at(c);
+	if (bs == 0 || bs != (std::size_t)volume(sp_local.d.kvdim(), col_labels))
+	  throw std::runtime_error("ILU0: unsupported block shape");
 
-      // Build row_map: local domain block coordinate -> local row index.
-      // This lets us translate the local BSR column coordinates into row ids.
-      std::map<std::array<int, NOp>, int> row_map;
-      for (std::size_t row_idx = 0; row_idx < ilu->nrows; ++row_idx)
-      {
-	const auto row_coor =
-	  superbblas::detail::index2coor((Index)row_idx, ii_host.size, row_strides);
-	ilu->row_coors[row_idx] = row_coor;
+	const auto& row_size = detail::to_kv(sp_local.i.order, sp_local.blki);
+	const auto row_strides =
+	  superbblas::detail::get_strides<Index>(ii_host.size, superbblas::FastToSlow);
+	const int* ii_ptr = ii_host.data();
+	const Coor<NOp>* jj_ptr = reinterpret_cast<const Coor<NOp>*>(jj_host.data());
+	auto x_pos = sp_local.i.order.find('X');
+	bool explicit_two_color =
+	  x_pos != std::string::npos && sp_local.i.kvdim().count('X') == 1 &&
+	  sp_local.i.kvdim().at('X') == 2 && detail::isEvenOddLayout(op.imgLayout) &&
+	  detail::isEvenOddLayout(op.domLayout);
 
-	std::array<int, NOp> dom_key{};
+	struct RowBlock {
+	  int col = -1;
+	  std::vector<COMPLEX> data;
+	};
+
+	// Compact factor storage for the explicit 2-color factorization:
+	//   L = [ I   0 ]
+	//       [L10  I ]
+	//   U = [U00 U01]
+	//       [ 0  U11]
+	struct ILUBlockData {
+	  std::size_t nrows = 0;
+	  std::size_t bs = 0;
+	  bool use_two_color = false;
+	  std::vector<Coor<NOp>> row_coors;
+	  std::vector<Coor<NOp>> dense_coors;
+	  std::vector<int> rows0;
+	  std::vector<int> rows1;
+	  std::vector<std::vector<RowBlock>> U01;
+	  std::vector<std::vector<RowBlock>> L10;
+	  std::vector<std::vector<RowBlock>> Lrows;
+	  std::vector<std::vector<RowBlock>> Urows;
+	  std::vector<std::vector<COMPLEX>> UdiagInv;
+	};
+	auto ilu = std::make_shared<ILUBlockData>();
+	ilu->nrows = ii_host.volume();
+	ilu->bs = bs;
+	ilu->row_coors.resize(ilu->nrows);
+	ilu->dense_coors.resize(bs);
+	ilu->U01.resize(ilu->nrows);
+	ilu->L10.resize(ilu->nrows);
+	ilu->Lrows.resize(ilu->nrows);
+	ilu->Urows.resize(ilu->nrows);
+	ilu->UdiagInv.assign(ilu->nrows, std::vector<COMPLEX>(bs * bs, COMPLEX{}));
+
+	auto color_of = [&](std::size_t row) {
+	  return x_pos == std::string::npos ? -1 : ilu->row_coors[row][x_pos];
+	};
+	auto mat_mul_into = [&](const std::vector<COMPLEX>& A, const std::vector<COMPLEX>& B,
+				std::vector<COMPLEX>& C) {
+	  C.assign(bs * bs, COMPLEX{});
+	  for (std::size_t i = 0; i < bs; ++i)
+	    for (std::size_t k = 0; k < bs; ++k)
+	    {
+	      COMPLEX aik = A[i * bs + k];
+	      for (std::size_t j = 0; j < bs; ++j)
+		C[i * bs + j] += aik * B[k * bs + j];
+	    }
+	};
+	auto mat_submul = [&](std::vector<COMPLEX>& C, const std::vector<COMPLEX>& A,
+			      const std::vector<COMPLEX>& B) {
+	  for (std::size_t i = 0; i < bs; ++i)
+	    for (std::size_t k = 0; k < bs; ++k)
+	    {
+	      COMPLEX aik = A[i * bs + k];
+	      for (std::size_t j = 0; j < bs; ++j)
+		C[i * bs + j] -= aik * B[k * bs + j];
+	    }
+	};
+	auto finite_block = [&](const std::vector<COMPLEX>& block) {
+	  for (const auto& v : block)
+	    if (!std::isfinite(std::real(v)) || !std::isfinite(std::imag(v)))
+	      return false;
+	  return true;
+	};
+
+	std::array<unsigned int, NOp> img_to_dom_pos{};
 	for (unsigned int p = 0; p < NOp; ++p)
-	  dom_key[img_to_dom_pos[p]] = row_coor[p];
-	row_map[dom_key] = (int)row_idx;
+	{
+	  char img_label = sp_local.i.order[p];
+	  char dom_label = t.second.at(img_label);
+	  auto pos = sp_local.d.order.find(dom_label);
+	  if (pos == std::string::npos)
+	    throw std::runtime_error("ILU0: failed to map image labels into domain labels");
+	  img_to_dom_pos[p] = (unsigned int)pos;
+	}
 
+	// Cache the coordinates of the entries inside each dense block so the apply path
+	// can rebuild local memory offsets without decoding the block structure every time.
+	for (std::size_t b = 0; b < ilu->bs; ++b)
+	{
+	  Coor<NOp> block_coor{{}};
+	  int t = (int)b;
+	  for (char c : row_labels)
+	  {
+	    int s = sp_local.i.kvdim().at(c);
+	    int v = t % s;
+	    t /= s;
+	    unsigned int p = (unsigned int)sp_local.i.order.find(c);
+	    block_coor[p] = v;
+	  }
+	  ilu->dense_coors[b] = block_coor;
+	}
+
+	// Build row_map: local domain block coordinate -> local row index.
+	// This lets us translate the local BSR column coordinates into row ids.
+	std::map<std::array<int, NOp>, int> row_map;
+	for (std::size_t row_idx = 0; row_idx < ilu->nrows; ++row_idx)
+	{
+	  const auto row_coor =
+	    superbblas::detail::index2coor((Index)row_idx, ii_host.size, row_strides);
+	  ilu->row_coors[row_idx] = row_coor;
+
+	  std::array<int, NOp> dom_key{};
+	  for (unsigned int p = 0; p < NOp; ++p)
+	    dom_key[img_to_dom_pos[p]] = row_coor[p];
+	  row_map[dom_key] = (int)row_idx;
+
+	  if (explicit_two_color)
+	  {
+	    int color = color_of(row_idx);
+	    if (color == 0)
+	      ilu->rows0.push_back((int)row_idx);
+	    else if (color == 1)
+	      ilu->rows1.push_back((int)row_idx);
+	    else
+	      explicit_two_color = false;
+	  }
+	}
+
+	// Materialize the local matrix in block form: Arows[i][j] is a bs x bs dense block.
+	// Only existing local BSR nonzeros are inserted, preserving the ILU(0) pattern.
+	std::vector<std::vector<RowBlock>> Arows(ilu->nrows);
+	std::vector<std::map<int, std::size_t>> ArowPos(ilu->nrows);
+	std::size_t col0 = 0;
+	for (std::size_t row_idx = 0; row_idx < ilu->nrows; ++row_idx)
+	{
+	  const auto row_from = detail::to_kv(ii_host.order, ilu->row_coors[row_idx]);
+	  const auto data_row = data_host.kvslice_from_size(row_from, row_size);
+	  for (std::size_t col = 0, num_nz = ii_ptr[row_idx]; col < num_nz; ++col, ++col0)
+	  {
+	    auto dom_coor = jj_ptr[col0];
+	    for (unsigned int q = 0; q < sp_local.nblockd + sp_local.nkrond; ++q)
+	      dom_coor[q] = 0;
+	    std::array<int, NOp> dom_key{};
+	    for (unsigned int q = 0; q < NOp; ++q)
+	      dom_key[q] = dom_coor[q];
+	    auto it_col = row_map.find(dom_key);
+	    if (it_col == row_map.end())
+	      continue;
+	    int col_idx = it_col->second;
+
+	    auto blk_src =
+	      data_row.kvslice_from_size({{'u', (int)col}}, {{'u', 1}}).make_sure(none, OnHost);
+	    std::string extra_labels =
+	      detail::remove_dimensions(blk_src.order, row_labels + col_labels);
+
+	    std::vector<COMPLEX> B(bs * bs, COMPLEX{});
+	    for (char lbl : extra_labels)
+	      if (blk_src.kvdim().at(lbl) != 1)
+		throw std::runtime_error("ILU0: unexpected non-singleton leftover label `" +
+					 std::string(1, lbl) +
+					 "` while flattening local sparse block; "
+					 "blk_src.order=`" +
+					 blk_src.order + "`, data_row.order=`" + data_row.order +
+					 "`, row_labels=`" + row_labels + "`, col_labels=`" +
+					 col_labels + "`, extra_labels=`" + extra_labels + "`");
+
+	    std::map<char, unsigned int> blk_pos;
+	    for (unsigned int p = 0; p < blk_src.order.size(); ++p)
+	      blk_pos[blk_src.order[p]] = p;
+
+	    for (std::size_t r = 0; r < bs; ++r)
+	      for (std::size_t c = 0; c < bs; ++c)
+	      {
+		Coor<2 * NOp + 1> elem{{}};
+
+		std::size_t tr = r;
+		for (char lbl : row_labels)
+		{
+		  int s = sp_local.i.kvdim().at(lbl);
+		  elem[blk_pos.at(lbl)] = (int)(tr % (std::size_t)s);
+		  tr /= (std::size_t)s;
+		}
+
+		std::size_t tc = c;
+		for (char lbl : col_labels)
+		{
+		  int s = sp_local.d.kvdim().at(lbl);
+		  elem[blk_pos.at(lbl)] = (int)(tc % (std::size_t)s);
+		  tc /= (std::size_t)s;
+		}
+
+		B[r * bs + c] = sp_local.scalar * blk_src.get(elem);
+	      }
+	    Arows[row_idx].push_back({col_idx, std::move(B)});
+	  }
+	  auto& row = Arows[row_idx];
+	  std::sort(row.begin(), row.end(),
+		    [](const RowBlock& a, const RowBlock& b) { return a.col < b.col; });
+	  for (std::size_t pos = 0; pos < row.size(); ++pos)
+	    ArowPos[row_idx][row[pos].col] = pos;
+	}
+
+	bool has_same_color_offdiag = false;
 	if (explicit_two_color)
 	{
-	  int color = color_of(row_idx);
-	  if (color == 0)
-	    ilu->rows0.push_back((int)row_idx);
-	  else if (color == 1)
-	    ilu->rows1.push_back((int)row_idx);
-	  else
-	    explicit_two_color = false;
+	  for (std::size_t i = 0; i < ilu->nrows && !has_same_color_offdiag; ++i)
+	  {
+	    for (const auto& entry : Arows[i])
+	    {
+	      if (entry.col != (int)i && color_of((std::size_t)entry.col) == color_of(i))
+	      {
+		has_same_color_offdiag = true;
+		break;
+	      }
+	    }
+	  }
 	}
-      }
+	ilu->use_two_color = explicit_two_color && !has_same_color_offdiag;
+	detail::log(1, prefix + (ilu->use_two_color ? " using 2-color ILU0"
+						    : " using generic block ILU(0) fallback"));
 
-      // Materialize the local matrix in block form: Arows[i][j] is a bs x bs dense block.
-      // Only existing local BSR nonzeros are inserted, preserving the ILU(0) pattern.
-      std::vector<std::vector<RowBlock>> Arows(ilu->nrows);
-      std::vector<std::map<int, std::size_t>> ArowPos(ilu->nrows);
-      std::size_t col0 = 0;
-      for (std::size_t row_idx = 0; row_idx < ilu->nrows; ++row_idx)
-      {
-	const auto row_from = detail::to_kv(ii_host.order, ilu->row_coors[row_idx]);
-	const auto data_row = data_host.kvslice_from_size(row_from, row_size);
-	for (std::size_t col = 0, num_nz = ii_ptr[row_idx]; col < num_nz; ++col, ++col0)
-	{
-	  auto dom_coor = jj_ptr[col0];
-	  for (unsigned int q = 0; q < sp_local.nblockd + sp_local.nkrond; ++q)
-	    dom_coor[q] = 0;
-	  std::array<int, NOp> dom_key{};
-	  for (unsigned int q = 0; q < NOp; ++q)
-	    dom_key[q] = dom_coor[q];
-	  auto it_col = row_map.find(dom_key);
-	  if (it_col == row_map.end())
-	    continue;
-	  int col_idx = it_col->second;
-
-	  auto blk_src =
-	    data_row.kvslice_from_size({{'u', (int)col}}, {{'u', 1}}).make_sure(none, OnHost);
-	  std::string extra_labels =
-	    detail::remove_dimensions(blk_src.order, row_labels + col_labels);
-
-	  std::vector<COMPLEX> B(bs * bs, COMPLEX{});
-	  for (char lbl : extra_labels)
-	    if (blk_src.kvdim().at(lbl) != 1)
-	      throw std::runtime_error("ILU0: unexpected non-singleton leftover label `" +
-				       std::string(1, lbl) + "` while flattening local sparse block; "
-				       "blk_src.order=`" + blk_src.order + "`, data_row.order=`" +
-				       data_row.order + "`, row_labels=`" + row_labels +
-				       "`, col_labels=`" + col_labels + "`, extra_labels=`" +
-				       extra_labels + "`");
-
-	  std::map<char, unsigned int> blk_pos;
-	  for (unsigned int p = 0; p < blk_src.order.size(); ++p)
-	    blk_pos[blk_src.order[p]] = p;
-
+	auto invert_block = [&](const std::vector<COMPLEX>& block, const std::string& name) {
+	  Tensor<3, COMPLEX> diag("rcu", Coor<3>{{(int)bs, (int)bs, 1}}, OnHost, Local);
+	  diag.set_zero();
 	  for (std::size_t r = 0; r < bs; ++r)
 	    for (std::size_t c = 0; c < bs; ++c)
-	    {
-	      Coor<2 * NOp + 1> elem{{}};
+	      diag.set({{(int)r, (int)c, 0}}, block[r * bs + c]);
 
-	      std::size_t tr = r;
-	      for (char lbl : row_labels)
+	  Tensor<3, COMPLEX> diagInv;
+	  try
+	  {
+	    diagInv = inv(diag, "r", "c").make_sure("rcu", OnHost, Local);
+	  } catch (const std::exception& e)
+	  {
+	    throw std::runtime_error("ILU0: failed to invert " + name + " block: " + e.what());
+	  }
+
+	  std::vector<COMPLEX> out(bs * bs, COMPLEX{});
+	  for (std::size_t r = 0; r < bs; ++r)
+	    for (std::size_t c = 0; c < bs; ++c)
+	      out[r * bs + c] = diagInv.get({{(int)r, (int)c, 0}});
+	  if (!finite_block(out))
+	    throw std::runtime_error("ILU0: singular diagonal " + name + " block");
+	  return out;
+	};
+
+	auto invert_diag_blocks = [&](const std::vector<int>& rows, const std::string& name) {
+	  for (int row : rows)
+	  {
+	    auto it_diag = ArowPos[(std::size_t)row].find(row);
+	    if (it_diag == ArowPos[(std::size_t)row].end())
+	      throw std::runtime_error("ILU0: missing diagonal block on local row " +
+				       std::to_string(row) + " (" + name + ")");
+	    ilu->UdiagInv[(std::size_t)row] = invert_block(
+	      Arows[(std::size_t)row][it_diag->second].data, name + " row " + std::to_string(row));
+	  }
+	};
+
+	if (ilu->use_two_color)
+	{
+	  invert_diag_blocks(ilu->rows0, "color-0");
+
+	  for (int row : ilu->rows0)
+	  {
+	    auto& U01row = ilu->U01[(std::size_t)row];
+	    for (const auto& entry : Arows[(std::size_t)row])
+	      if (color_of((std::size_t)entry.col) == 1)
+		U01row.push_back(entry);
+	  }
+
+	  for (int row : ilu->rows1)
+	  {
+	    auto it_diag = ArowPos[(std::size_t)row].find(row);
+	    if (it_diag == ArowPos[(std::size_t)row].end())
+	      throw std::runtime_error("ILU0: missing diagonal block on local row " +
+				       std::to_string(row) + " (color-1)");
+
+	    auto& L10row = ilu->L10[(std::size_t)row];
+	    for (const auto& entry : Arows[(std::size_t)row])
+	    {
+	      if (color_of((std::size_t)entry.col) != 0)
+		continue;
+	      RowBlock lij;
+	      lij.col = entry.col;
+	      mat_mul_into(entry.data, ilu->UdiagInv[(std::size_t)entry.col], lij.data);
+	      L10row.push_back(std::move(lij));
+	    }
+
+	    auto& U11 = Arows[(std::size_t)row][it_diag->second].data;
+	    for (const auto& lij : L10row)
+	    {
+	      const auto& U01row = ilu->U01[(std::size_t)lij.col];
+	      auto it_u01 = std::find_if(U01row.begin(), U01row.end(),
+					 [&](const RowBlock& entry) { return entry.col == row; });
+	      if (it_u01 != U01row.end())
+		mat_submul(U11, lij.data, it_u01->data);
+	    }
+	  }
+
+	  invert_diag_blocks(ilu->rows1, "color-1");
+	}
+	else
+	{
+	  auto factorRows = Arows;
+	  auto factorPos = ArowPos;
+	  for (std::size_t i = 0; i < ilu->nrows; ++i)
+	  {
+	    auto& row = factorRows[i];
+	    auto& rowPos = factorPos[i];
+	    for (std::size_t pos = 0; pos < row.size(); ++pos)
+	    {
+	      int j = row[pos].col;
+	      if (j >= (int)i)
+		break;
+	      RowBlock lij;
+	      lij.col = j;
+	      mat_mul_into(row[pos].data, ilu->UdiagInv[(std::size_t)j], lij.data);
+	      row[pos].data = lij.data;
+	      ilu->Lrows[i].push_back(lij);
+
+	      for (const auto& ujk : ilu->Urows[(std::size_t)j])
 	      {
-		int s = sp_local.i.kvdim().at(lbl);
-		elem[blk_pos.at(lbl)] = (int)(tr % (std::size_t)s);
-		tr /= (std::size_t)s;
+		auto it = rowPos.find(ujk.col);
+		if (it != rowPos.end())
+		  mat_submul(row[it->second].data, lij.data, ujk.data);
 	      }
+	    }
 
-	      std::size_t tc = c;
-	      for (char lbl : col_labels)
+	    auto it_diag = rowPos.find((int)i);
+	    if (it_diag == rowPos.end())
+	      throw std::runtime_error("ILU0: missing diagonal block on local row " +
+				       std::to_string(i) + " (generic)");
+	    ilu->UdiagInv[i] =
+	      invert_block(row[it_diag->second].data, "generic row " + std::to_string(i));
+
+	    for (const auto& entry : row)
+	      if (entry.col > (int)i)
+		ilu->Urows[i].push_back(entry);
+	  }
+	}
+
+	return Operator<NOp, COMPLEX>{
+	  [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+	    std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
+	    std::size_t nrhs = x.volume(order_cols);
+	    if (nrhs == 0)
+	      return;
+	    auto xh = x.make_sure(sp_local.i.order + order_cols, OnHost);
+	    auto yh = y.make_compatible(sp_local.i.order + order_cols, {}, OnHost);
+	    yh.set_zero();
+	    auto x_local = xh.getLocal();
+	    auto y_local = yh.getLocal();
+
+	    std::vector<COMPLEX> z((std::size_t)ilu->nrows * ilu->bs * nrhs, COMPLEX{});
+	    std::vector<COMPLEX> yy((std::size_t)ilu->nrows * ilu->bs * nrhs, COMPLEX{});
+	    std::vector<COMPLEX> tmp(ilu->bs * nrhs, COMPLEX{});
+
+	    const COMPLEX* xptr = x_local.data();
+	    COMPLEX* yptr = y_local.data();
+	    const auto full_strides =
+	      superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
+
+	    const std::string rhs_order = order_cols;
+	    // Precompute memory offsets of RHS columns in xh/yh.
+	    std::vector<std::size_t> rhs_off(nrhs, 0);
+	    if (rhs_order.empty())
+	    {
+	      rhs_off[0] = 0;
+	    }
+	    else
+	    {
+	      std::vector<int> rhs_sizes;
+	      rhs_sizes.reserve(rhs_order.size());
+	      for (char c : rhs_order)
+		rhs_sizes.push_back(x_local.kvdim().at(c));
+	      for (std::size_t c = 0; c < nrhs; ++c)
 	      {
-		int s = sp_local.d.kvdim().at(lbl);
-		elem[blk_pos.at(lbl)] = (int)(tc % (std::size_t)s);
-		tc /= (std::size_t)s;
+		std::size_t off = 0;
+		std::size_t tcol = c;
+		for (std::size_t k = 0; k < rhs_order.size(); ++k)
+		{
+		  int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
+		  tcol /= (std::size_t)rhs_sizes[k];
+		  unsigned int p = (unsigned int)x_local.order.find(rhs_order[k]);
+		  off += (std::size_t)v * full_strides[p];
+		}
+		rhs_off[c] = off;
 	      }
-
-	      B[r * bs + c] = sp_local.scalar * blk_src.get(elem);
 	    }
-	  Arows[row_idx].push_back({col_idx, std::move(B)});
-	}
-	auto& row = Arows[row_idx];
-	std::sort(row.begin(), row.end(),
-		  [](const RowBlock& a, const RowBlock& b) { return a.col < b.col; });
-	for (std::size_t pos = 0; pos < row.size(); ++pos)
-	  ArowPos[row_idx][row[pos].col] = pos;
-      }
 
-      bool has_same_color_offdiag = false;
-      if (explicit_two_color)
-      {
-	for (std::size_t i = 0; i < ilu->nrows && !has_same_color_offdiag; ++i)
-	{
-	  for (const auto& entry : Arows[i])
-	  {
-	    if (entry.col != (int)i && color_of((std::size_t)entry.col) == color_of(i))
-	    {
-	      has_same_color_offdiag = true;
-	      break;
-	    }
-	  }
-	}
-      }
-      ilu->use_two_color = explicit_two_color && !has_same_color_offdiag;
-      detail::log(1, prefix + (ilu->use_two_color ? " using 2-color ILU0"
-						  : " using generic block ILU(0) fallback"));
-
-      auto invert_block = [&](const std::vector<COMPLEX>& block, const std::string& name) {
-	Tensor<3, COMPLEX> diag("rcu", Coor<3>{{(int)bs, (int)bs, 1}}, OnHost, Local);
-	diag.set_zero();
-	for (std::size_t r = 0; r < bs; ++r)
-	  for (std::size_t c = 0; c < bs; ++c)
-	    diag.set({{(int)r, (int)c, 0}}, block[r * bs + c]);
-
-	Tensor<3, COMPLEX> diagInv;
-	try
-	{
-	  diagInv = inv(diag, "r", "c").make_sure("rcu", OnHost, Local);
-	}
-	catch (const std::exception& e)
-	{
-	  throw std::runtime_error("ILU0: failed to invert " + name + " block: " + e.what());
-	}
-
-	std::vector<COMPLEX> out(bs * bs, COMPLEX{});
-	for (std::size_t r = 0; r < bs; ++r)
-	  for (std::size_t c = 0; c < bs; ++c)
-	    out[r * bs + c] = diagInv.get({{(int)r, (int)c, 0}});
-	if (!finite_block(out))
-	  throw std::runtime_error("ILU0: singular diagonal " + name + " block");
-	return out;
-      };
-
-      auto invert_diag_blocks = [&](const std::vector<int>& rows, const std::string& name) {
-	for (int row : rows)
-	{
-	  auto it_diag = ArowPos[(std::size_t)row].find(row);
-	  if (it_diag == ArowPos[(std::size_t)row].end())
-	    throw std::runtime_error("ILU0: missing diagonal block on local row " +
-				     std::to_string(row) + " (" + name + ")");
-	  ilu->UdiagInv[(std::size_t)row] =
-	    invert_block(Arows[(std::size_t)row][it_diag->second].data,
-			 name + " row " + std::to_string(row));
-	}
-      };
-
-      if (ilu->use_two_color)
-      {
-	invert_diag_blocks(ilu->rows0, "color-0");
-
-	for (int row : ilu->rows0)
-	{
-	  auto& U01row = ilu->U01[(std::size_t)row];
-	  for (const auto& entry : Arows[(std::size_t)row])
-	    if (color_of((std::size_t)entry.col) == 1)
-	      U01row.push_back(entry);
-	}
-
-	for (int row : ilu->rows1)
-	{
-	  auto it_diag = ArowPos[(std::size_t)row].find(row);
-	  if (it_diag == ArowPos[(std::size_t)row].end())
-	    throw std::runtime_error("ILU0: missing diagonal block on local row " +
-				     std::to_string(row) + " (color-1)");
-
-	  auto& L10row = ilu->L10[(std::size_t)row];
-	  for (const auto& entry : Arows[(std::size_t)row])
-	  {
-	    if (color_of((std::size_t)entry.col) != 0)
-	      continue;
-	    RowBlock lij;
-	    lij.col = entry.col;
-	    mat_mul_into(entry.data, ilu->UdiagInv[(std::size_t)entry.col], lij.data);
-	    L10row.push_back(std::move(lij));
-	  }
-
-	  auto& U11 = Arows[(std::size_t)row][it_diag->second].data;
-	  for (const auto& lij : L10row)
-	  {
-	    const auto& U01row = ilu->U01[(std::size_t)lij.col];
-	    auto it_u01 = std::find_if(U01row.begin(), U01row.end(),
-				       [&](const RowBlock& entry) { return entry.col == row; });
-	    if (it_u01 != U01row.end())
-	      mat_submul(U11, lij.data, it_u01->data);
-	  }
-	}
-
-	invert_diag_blocks(ilu->rows1, "color-1");
-      }
-      else
-      {
-	auto factorRows = Arows;
-	auto factorPos = ArowPos;
-	for (std::size_t i = 0; i < ilu->nrows; ++i)
-	{
-	  auto& row = factorRows[i];
-	  auto& rowPos = factorPos[i];
-	  for (std::size_t pos = 0; pos < row.size(); ++pos)
-	  {
-	    int j = row[pos].col;
-	    if (j >= (int)i)
-	      break;
-	    RowBlock lij;
-	    lij.col = j;
-	    mat_mul_into(row[pos].data, ilu->UdiagInv[(std::size_t)j], lij.data);
-	    row[pos].data = lij.data;
-	    ilu->Lrows[i].push_back(lij);
-
-	    for (const auto& ujk : ilu->Urows[(std::size_t)j])
-	    {
-	      auto it = rowPos.find(ujk.col);
-	      if (it != rowPos.end())
-		mat_submul(row[it->second].data, lij.data, ujk.data);
-	    }
-	  }
-
-	  auto it_diag = rowPos.find((int)i);
-	  if (it_diag == rowPos.end())
-	    throw std::runtime_error("ILU0: missing diagonal block on local row " +
-				     std::to_string(i) + " (generic)");
-	  ilu->UdiagInv[i] =
-	    invert_block(row[it_diag->second].data, "generic row " + std::to_string(i));
-
-	  for (const auto& entry : row)
-	    if (entry.col > (int)i)
-	      ilu->Urows[i].push_back(entry);
-	}
-      }
-
-      return Operator<NOp, COMPLEX>{
-	[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-	  std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
-	  std::size_t nrhs = x.volume(order_cols);
-	  if (nrhs == 0)
-	    return;
-	  auto xh = x.make_sure(sp_local.i.order + order_cols, OnHost);
-	  auto yh = y.make_compatible(sp_local.i.order + order_cols, {}, OnHost);
-	  yh.set_zero();
-	  auto x_local = xh.getLocal();
-	  auto y_local = yh.getLocal();
-
-	  std::vector<COMPLEX> z((std::size_t)ilu->nrows * ilu->bs * nrhs, COMPLEX{});
-	  std::vector<COMPLEX> yy((std::size_t)ilu->nrows * ilu->bs * nrhs, COMPLEX{});
-	  std::vector<COMPLEX> tmp(ilu->bs * nrhs, COMPLEX{});
-
-	  const COMPLEX* xptr = x_local.data();
-	  COMPLEX* yptr = y_local.data();
-	  const auto full_strides =
-	    superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
-
-	  const std::string rhs_order = order_cols;
-	  // Precompute memory offsets of RHS columns in xh/yh.
-	  std::vector<std::size_t> rhs_off(nrhs, 0);
-	  if (rhs_order.empty())
-	  {
-	    rhs_off[0] = 0;
-	  }
-	  else
-	  {
-	    std::vector<int> rhs_sizes;
-	    rhs_sizes.reserve(rhs_order.size());
-	    for (char c : rhs_order)
-	      rhs_sizes.push_back(x_local.kvdim().at(c));
-	    for (std::size_t c = 0; c < nrhs; ++c)
+	    // Precompute offsets for entries inside each dense bs-sized block.
+	    std::vector<std::size_t> dense_off(ilu->bs, 0);
+	    for (std::size_t b = 0; b < ilu->bs; ++b)
 	    {
 	      std::size_t off = 0;
-	      std::size_t tcol = c;
-	      for (std::size_t k = 0; k < rhs_order.size(); ++k)
-	      {
-		int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
-		tcol /= (std::size_t)rhs_sizes[k];
-		unsigned int p = (unsigned int)x_local.order.find(rhs_order[k]);
-		off += (std::size_t)v * full_strides[p];
-	      }
-	      rhs_off[c] = off;
-	    }
-	  }
-
-	  // Precompute offsets for entries inside each dense bs-sized block.
-	  std::vector<std::size_t> dense_off(ilu->bs, 0);
-	  for (std::size_t b = 0; b < ilu->bs; ++b)
-	  {
-	    std::size_t off = 0;
-	    for (unsigned int p = 0; p < NOp; ++p)
-	      off += (std::size_t)ilu->dense_coors[b][p] * full_strides[p];
-	    dense_off[b] = off;
-	  }
-
-	  // Precompute offsets for each block-row anchor in tensor storage.
-	  std::vector<std::size_t> row_off(ilu->nrows, 0);
-	  for (std::size_t i = 0; i < ilu->nrows; ++i)
-	  {
-	    std::size_t off = 0;
-	    for (unsigned int p = 0; p < NOp; ++p)
-	      off += (std::size_t)ilu->row_coors[i][p] * full_strides[p];
-	    row_off[i] = off;
-	  }
-
-	  auto zref = [&](std::size_t i, std::size_t b, std::size_t c) -> COMPLEX& {
-	    return z[(i * ilu->bs + b) * nrhs + c];
-	  };
-	  auto yref = [&](std::size_t i, std::size_t b, std::size_t c) -> COMPLEX& {
-	    return yy[(i * ilu->bs + b) * nrhs + c];
-	  };
-
-	  if (ilu->use_two_color)
-	  {
-	    // z0 = x0
-	    for (int row : ilu->rows0)
-	    {
-	      std::size_t i = (std::size_t)row;
-	      for (std::size_t b = 0; b < ilu->bs; ++b)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+	      for (unsigned int p = 0; p < NOp; ++p)
+		off += (std::size_t)ilu->dense_coors[b][p] * full_strides[p];
+	      dense_off[b] = off;
 	    }
 
-	    // z1 = x1 - L10 * z0
-	    for (int row : ilu->rows1)
-	    {
-	      std::size_t i = (std::size_t)row;
-	      for (std::size_t b = 0; b < ilu->bs; ++b)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
-	      for (const auto& it : ilu->L10[i])
-	      {
-		std::size_t j = (std::size_t)it.col;
-		const auto& Lij = it.data;
-		for (std::size_t r = 0; r < ilu->bs; ++r)
-		  for (std::size_t c = 0; c < nrhs; ++c)
-		  {
-		    COMPLEX acc = COMPLEX{};
-		    for (std::size_t k = 0; k < ilu->bs; ++k)
-		      acc += Lij[r * ilu->bs + k] * zref(j, k, c);
-		    zref(i, r, c) -= acc;
-		  }
-	      }
-	    }
-
-	    // y1 = inv(U11) * z1
-	    for (int row : ilu->rows1)
-	    {
-	      std::size_t i = (std::size_t)row;
-	      std::fill(tmp.begin(), tmp.end(), COMPLEX{});
-	      for (std::size_t r = 0; r < ilu->bs; ++r)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  for (std::size_t k = 0; k < ilu->bs; ++k)
-		    tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * zref(i, k, c);
-	      for (std::size_t r = 0; r < ilu->bs; ++r)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  yref(i, r, c) = tmp[r * nrhs + c];
-	    }
-
-	    // y0 = inv(U00) * (x0 - U01 * y1)
-	    for (int row : ilu->rows0)
-	    {
-	      std::size_t i = (std::size_t)row;
-	      for (std::size_t b = 0; b < ilu->bs; ++b)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  yref(i, b, c) = zref(i, b, c);
-	      for (const auto& it : ilu->U01[i])
-	      {
-		std::size_t j = (std::size_t)it.col;
-		const auto& Uij = it.data;
-		for (std::size_t r = 0; r < ilu->bs; ++r)
-		  for (std::size_t c = 0; c < nrhs; ++c)
-		  {
-		    COMPLEX acc = COMPLEX{};
-		    for (std::size_t k = 0; k < ilu->bs; ++k)
-		      acc += Uij[r * ilu->bs + k] * yref(j, k, c);
-		    yref(i, r, c) -= acc;
-		  }
-	      }
-	      std::fill(tmp.begin(), tmp.end(), COMPLEX{});
-	      for (std::size_t r = 0; r < ilu->bs; ++r)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  for (std::size_t k = 0; k < ilu->bs; ++k)
-		    tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * yref(i, k, c);
-	      for (std::size_t r = 0; r < ilu->bs; ++r)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  yref(i, r, c) = tmp[r * nrhs + c];
-	    }
-	  }
-	  else
-	  {
+	    // Precompute offsets for each block-row anchor in tensor storage.
+	    std::vector<std::size_t> row_off(ilu->nrows, 0);
 	    for (std::size_t i = 0; i < ilu->nrows; ++i)
 	    {
-	      for (std::size_t b = 0; b < ilu->bs; ++b)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
-	      for (const auto& it : ilu->Lrows[i])
-	      {
-		std::size_t j = (std::size_t)it.col;
-		const auto& Lij = it.data;
-		for (std::size_t r = 0; r < ilu->bs; ++r)
-		  for (std::size_t c = 0; c < nrhs; ++c)
-		  {
-		    COMPLEX acc = COMPLEX{};
-		    for (std::size_t k = 0; k < ilu->bs; ++k)
-		      acc += Lij[r * ilu->bs + k] * zref(j, k, c);
-		    zref(i, r, c) -= acc;
-		  }
-	      }
+	      std::size_t off = 0;
+	      for (unsigned int p = 0; p < NOp; ++p)
+		off += (std::size_t)ilu->row_coors[i][p] * full_strides[p];
+	      row_off[i] = off;
 	    }
 
-	    for (std::size_t ii = ilu->nrows; ii-- > 0;)
+	    auto zref = [&](std::size_t i, std::size_t b, std::size_t c) -> COMPLEX& {
+	      return z[(i * ilu->bs + b) * nrhs + c];
+	    };
+	    auto yref = [&](std::size_t i, std::size_t b, std::size_t c) -> COMPLEX& {
+	      return yy[(i * ilu->bs + b) * nrhs + c];
+	    };
+
+	    if (ilu->use_two_color)
 	    {
-	      std::size_t i = ii;
-	      for (std::size_t b = 0; b < ilu->bs; ++b)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  yref(i, b, c) = zref(i, b, c);
-	      for (const auto& it : ilu->Urows[i])
+	      // z0 = x0
+	      for (int row : ilu->rows0)
 	      {
-		std::size_t j = (std::size_t)it.col;
-		const auto& Uij = it.data;
+		std::size_t i = (std::size_t)row;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+	      }
+
+	      // z1 = x1 - L10 * z0
+	      for (int row : ilu->rows1)
+	      {
+		std::size_t i = (std::size_t)row;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+		for (const auto& it : ilu->L10[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Lij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Lij[r * ilu->bs + k] * zref(j, k, c);
+		      zref(i, r, c) -= acc;
+		    }
+		}
+	      }
+
+	      // y1 = inv(U11) * z1
+	      for (int row : ilu->rows1)
+	      {
+		std::size_t i = (std::size_t)row;
+		std::fill(tmp.begin(), tmp.end(), COMPLEX{});
 		for (std::size_t r = 0; r < ilu->bs; ++r)
 		  for (std::size_t c = 0; c < nrhs; ++c)
-		  {
-		    COMPLEX acc = COMPLEX{};
 		    for (std::size_t k = 0; k < ilu->bs; ++k)
-		      acc += Uij[r * ilu->bs + k] * yref(j, k, c);
-		    yref(i, r, c) -= acc;
-		  }
+		      tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * zref(i, k, c);
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, r, c) = tmp[r * nrhs + c];
 	      }
-	      std::fill(tmp.begin(), tmp.end(), COMPLEX{});
-	      for (std::size_t r = 0; r < ilu->bs; ++r)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  for (std::size_t k = 0; k < ilu->bs; ++k)
-		    tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * yref(i, k, c);
-	      for (std::size_t r = 0; r < ilu->bs; ++r)
-		for (std::size_t c = 0; c < nrhs; ++c)
-		  yref(i, r, c) = tmp[r * nrhs + c];
+
+	      // y0 = inv(U00) * (x0 - U01 * y1)
+	      for (int row : ilu->rows0)
+	      {
+		std::size_t i = (std::size_t)row;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, b, c) = zref(i, b, c);
+		for (const auto& it : ilu->U01[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Uij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Uij[r * ilu->bs + k] * yref(j, k, c);
+		      yref(i, r, c) -= acc;
+		    }
+		}
+		std::fill(tmp.begin(), tmp.end(), COMPLEX{});
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    for (std::size_t k = 0; k < ilu->bs; ++k)
+		      tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * yref(i, k, c);
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, r, c) = tmp[r * nrhs + c];
+	      }
 	    }
-	  }
+	    else
+	    {
+	      for (std::size_t i = 0; i < ilu->nrows; ++i)
+	      {
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+		for (const auto& it : ilu->Lrows[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Lij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Lij[r * ilu->bs + k] * zref(j, k, c);
+		      zref(i, r, c) -= acc;
+		    }
+		}
+	      }
 
-	  for (std::size_t i = 0; i < ilu->nrows; ++i)
-	    for (std::size_t b = 0; b < ilu->bs; ++b)
-	      for (std::size_t c = 0; c < nrhs; ++c)
-		yptr[row_off[i] + dense_off[b] + rhs_off[c]] = yref(i, b, c);
+	      for (std::size_t ii = ilu->nrows; ii-- > 0;)
+	      {
+		std::size_t i = ii;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, b, c) = zref(i, b, c);
+		for (const auto& it : ilu->Urows[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Uij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Uij[r * ilu->bs + k] * yref(j, k, c);
+		      yref(i, r, c) -= acc;
+		    }
+		}
+		std::fill(tmp.begin(), tmp.end(), COMPLEX{});
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    for (std::size_t k = 0; k < ilu->bs; ++k)
+		      tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * yref(i, k, c);
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, r, c) = tmp[r * nrhs + c];
+	      }
+	    }
 
-	  yh.copyTo(y);
-	},
-	op.i,
-	op.d,
-	nullptr,
-	op.order_t,
-	op.imgLayout,
-	op.domLayout,
-	DenseOperator(),
-	op.preferred_col_ordering,
-	false};
-	}
+	    for (std::size_t i = 0; i < ilu->nrows; ++i)
+	      for (std::size_t b = 0; b < ilu->bs; ++b)
+		for (std::size_t c = 0; c < nrhs; ++c)
+		  yptr[row_off[i] + dense_off[b] + rhs_off[c]] = yref(i, b, c);
 
+	    yh.copyTo(y);
+	  },
+	  op.i,
+	  op.d,
+	  nullptr,
+	  op.order_t,
+	  op.imgLayout,
+	  op.domLayout,
+	  DenseOperator(),
+	  op.preferred_col_ordering,
+	  false};
+      }
 
       /// Returns a blocking, which should enhanced the performance of the sparse-dense tensor contraction.
       ///
@@ -4266,8 +4260,10 @@ namespace Chroma
 
 	// Primme solver setup
 	primme.numEvals = numEvals;
-	primme.printLevel =
-	  (verb == NoOutput ? 0 : verb == JustSummary ? 1 : verb == Detailed ? 3 : 5);
+	primme.printLevel = (verb == NoOutput	   ? 0
+			     : verb == JustSummary ? 1
+			     : verb == Detailed	   ? 3
+						   : 5);
 	primme.n = op_double.d.volume();
 	primme.eps = tol;
 	primme.target = primme_largest_abs;
@@ -4442,31 +4438,31 @@ namespace Chroma
 	{
 	  int ns = op.d.kvdim().at('s');
 	  auto g5 = getGamma5<COMPLEX>(ns, op.d.getDev(), op.d.dist);
-	  shifted_op = {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-			  // y = op * x
-			  op(x, y);
+	  shifted_op = {
+	    [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+	      // y = op * x
+	      op(x, y);
 
-			  // y +=  x * shift_I
-			  if (shift_I != 0)
-			    x.scale(shift_I).addTo(y);
+	      // y +=  x * shift_I
+	      if (shift_I != 0)
+		x.scale(shift_I).addTo(y);
 
-			  // y += shift_ig5 * i * g5
-			  if (shift_ig5 != 0)
-			  {
-			    COMPLEX ishift =
-			      static_cast<COMPLEX>(std::complex<double>{0.0, shift_ig5});
-			    if (ns == 1)
-			    {
-			      x.scale(ishift).addTo(y);
-			    }
-			    else
-			    {
-			      contract<NOp + 1>(g5.rename_dims({{'j', 's'}}).scale(ishift), x, "s",
-						AddTo, y, {{'s', 'i'}});
-			    }
-			  }
-			},
-			op.d, op.i, nullptr, op};
+	      // y += shift_ig5 * i * g5
+	      if (shift_ig5 != 0)
+	      {
+		COMPLEX ishift = static_cast<COMPLEX>(std::complex<double>{0.0, shift_ig5});
+		if (ns == 1)
+		{
+		  x.scale(ishift).addTo(y);
+		}
+		else
+		{
+		  contract<NOp + 1>(g5.rename_dims({{'j', 's'}}).scale(ishift), x, "s", AddTo, y,
+				    {{'s', 'i'}});
+		}
+	      }
+	    },
+	    op.d, op.i, nullptr, op};
 	}
 
 	// Get the solver
@@ -4596,27 +4592,27 @@ namespace Chroma
       template <std::size_t NOp, typename COMPLEX>
       Operator<NOp, COMPLEX> getPrint(Operator<NOp, COMPLEX> op, const Options& ops,
 				      Operator<NOp, COMPLEX> prec_, SolverSpace solverSpace)
-	      {
-		// Store operator in file
-		std::string save_op_in_file = getOption<std::string>(ops, "save_in_file", "");
-		if (!save_op_in_file.empty())
-		{
-		  if (!op.sp)
-		    ops.throw_error("getPrint: cannot store an implicit operator");
-		  if (!op.sp.is_kronecker())
-		  {
-		    op.sp.store(save_op_in_file);
-		  }
-		  else
-		  {
-		    QDPIO::cout << "BEGIN_KRON_MATRIX_DUMP " << save_op_in_file << std::endl;
-		    QDPIO::cout << "% save_in_file=" << save_op_in_file << std::endl;
-		    QDPIO::cout.flush();
-		    op.sp.print("A");
-		    QDPIO::cout << "END_KRON_MATRIX_DUMP " << save_op_in_file << std::endl;
-		    QDPIO::cout.flush();
-		  }
-		}
+      {
+	// Store operator in file
+	std::string save_op_in_file = getOption<std::string>(ops, "save_in_file", "");
+	if (!save_op_in_file.empty())
+	{
+	  if (!op.sp)
+	    ops.throw_error("getPrint: cannot store an implicit operator");
+	  if (!op.sp.is_kronecker())
+	  {
+	    op.sp.store(save_op_in_file);
+	  }
+	  else
+	  {
+	    QDPIO::cout << "BEGIN_KRON_MATRIX_DUMP " << save_op_in_file << std::endl;
+	    QDPIO::cout << "% save_in_file=" << save_op_in_file << std::endl;
+	    QDPIO::cout.flush();
+	    op.sp.print("A");
+	    QDPIO::cout << "END_KRON_MATRIX_DUMP " << save_op_in_file << std::endl;
+	    QDPIO::cout.flush();
+	  }
+	}
 
 	// Get the solver options
 	const Options& solverOps = getOptions(ops, "solver");
@@ -4654,25 +4650,17 @@ namespace Chroma
 	CASTING,
 	PRINT
       };
-      static const std::map<std::string, SolverType> solverTypeMap{{"fgmres", FGMRES},
-								   {"bicgstab", BICGSTAB},
-								   {"mr", MR},
-								   {"gcr", GCR},
-								   {"mg", MG},
-								   {"eo", EO},
-								   {"hie", HIE},
-								   {"dd", DD},
-								   {"bj", BJ}, // A M M^{-1} y = x; BJ = M^{-1}; size(BJ) = size(A) = (n, n); size(y) = (n, 1)
-	  							   {"jc", JC},
-								   {"ilu", ILU},
-								   {"shift", SHIFT},
-								   {"proj", PROJ},
-								   {"spineo", SPINEO},
-								   {"igd", IGD},
-								   {"g5", G5},
-								   {"blocking", BLOCKING},
-								   {"casting", CASTING},
-								   {"print", PRINT}};
+      static const std::map<std::string, SolverType> solverTypeMap{
+	{"fgmres", FGMRES},   {"bicgstab", BICGSTAB},
+	{"mr", MR},	      {"gcr", GCR},
+	{"mg", MG},	      {"eo", EO},
+	{"hie", HIE},	      {"dd", DD},
+	{"bj", BJ}, // A M M^{-1} y = x; BJ = M^{-1}; size(BJ) = size(A) = (n, n); size(y) = (n, 1)
+	{"jc", JC},	      {"ilu", ILU},
+	{"shift", SHIFT},     {"proj", PROJ},
+	{"spineo", SPINEO},   {"igd", IGD},
+	{"g5", G5},	      {"blocking", BLOCKING},
+	{"casting", CASTING}, {"print", PRINT}};
       SolverType solverType = getOption<SolverType>(ops, "type", solverTypeMap);
       switch (solverType)
       {

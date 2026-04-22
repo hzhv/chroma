@@ -27,6 +27,7 @@ option(Chroma_ENABLE_MGPROTO "Enable MG-Proto" OFF)
 option(Chroma_ENABLE_LAPACK "Enable Lapack Binding in QDPLapack" OFF)
 option(Chroma_ENABLE_OPENMP "Enable OpenMP" OFF)
 option(Chroma_ENABLE_SUPERBBLAS  "Enable tasks using Superbblas" OFF)
+option(Chroma_ENABLE_SUPERLU_DIST "Enable MGPROTON SuperLU_DIST solver" OFF)
 option(Chroma_ENABLE_PRIMME  "Build with PRIMME" OFF)
 option(Chroma_ENABLE_CUDA  "Build with CUDA" OFF)
 option(Chroma_ENABLE_ROCM  "Build with ROCM" OFF)
@@ -53,6 +54,7 @@ option(Chroma_QPHIX_DSLASH "Set to ON to enable QPhiX Dslash. QDP-JIT builds wit
 option(Chroma_USE_MGPROTO "Use the MGProto Multigrid solver" OFF)
 
 set(SUPERBBLAS_DIR "" CACHE PATH "path to superbblas installation")
+set(SUPERLU_DIST_ROOT "" CACHE PATH "path to superlu_dist installation root")
 set(PRIMME_DIR "" CACHE PATH "path to PRIMME installation")
 
 ##################
@@ -223,11 +225,19 @@ if( Chroma_ENABLE_SUPERBBLAS )
 
   set(BUILD_SB 1)
 
+  if( Chroma_ENABLE_SUPERLU_DIST )
+    set(BUILD_SUPERLU_DIST 1)
+  endif()
+
   # Deal with PRIMME
   if( Chroma_ENABLE_PRIMME )
     message(STATUS "Enabling PRIMME")
     set(BUILD_PRIMME 1)
   endif()
+endif()
+
+if( Chroma_ENABLE_SUPERLU_DIST AND NOT Chroma_ENABLE_SUPERBBLAS )
+  message(FATAL_ERROR "Chroma_ENABLE_SUPERLU_DIST requires Chroma_ENABLE_SUPERBBLAS")
 endif()
 
 

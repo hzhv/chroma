@@ -55,6 +55,9 @@
 /* Build SUPERB tasks */
 #cmakedefine BUILD_SB   @BUILD_SB@
 
+/* Build with SuperLU_DIST */
+#cmakedefine BUILD_SUPERLU_DIST @BUILD_SUPERLU_DIST@
+
 /* Build with PRIMME */
 #cmakedefine BUILD_PRIMME   @BUILD_PRIMME@
 

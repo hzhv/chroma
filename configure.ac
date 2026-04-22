@@ -425,6 +425,15 @@ AC_ARG_WITH(superbblas,
   [ with_superbblas="no" ]
 )
 
+AC_ARG_WITH(superlu-dist,
+  AC_HELP_STRING(
+    [--with-superlu-dist=DIR],
+    [Build Chroma MGPROTON SuperLU_DIST solver using superlu_dist installed in DIR]
+  ),
+  [ SUPERLU_DIST_HOME="${with_superlu_dist}" ],
+  [ with_superlu_dist="no" ]
+)
+
 AC_ARG_WITH(primme,
   AC_HELP_STRING(
     [--with-primme=DIR],
@@ -1389,6 +1398,56 @@ fi
 
 AM_CONDITIONAL(BUILD_SB,
 	[test "x${with_superbblas}x" != "xnox" ])
+
+################################################################################
+# SuperLU_DIST
+################################################################################
+
+if test "x${with_superlu_dist}x" != "xnox";
+then
+  if test "x${with_superbblas}x" = "xnox";
+  then
+    AC_MSG_ERROR([SuperLU_DIST support requires superbblas support; please also enable --with-superbblas])
+  fi
+
+  AC_PATH_PROG(PKG_CONFIG, [pkg-config], [])
+  if test "X${PKG_CONFIG}X" = "XX";
+  then
+    AC_MSG_ERROR([pkg-config is required to discover superlu_dist])
+  fi
+
+  SUPERLU_DIST_PKG_CONFIG_PATH="${PKG_CONFIG_PATH}"
+  if test "X${SUPERLU_DIST_HOME}X" != "XX";
+  then
+    if test "X${SUPERLU_DIST_PKG_CONFIG_PATH}X" = "XX";
+    then
+      SUPERLU_DIST_PKG_CONFIG_PATH="${SUPERLU_DIST_HOME}/lib/pkgconfig"
+    else
+      SUPERLU_DIST_PKG_CONFIG_PATH="${SUPERLU_DIST_HOME}/lib/pkgconfig:${SUPERLU_DIST_PKG_CONFIG_PATH}"
+    fi
+  fi
+
+  SUPERLU_DIST_CXXFLAGS=`PKG_CONFIG_PATH="${SUPERLU_DIST_PKG_CONFIG_PATH}" ${PKG_CONFIG} --cflags superlu_dist 2>/dev/null`
+  if test $? -ne 0;
+  then
+    AC_MSG_ERROR([failed to query superlu_dist compile flags with pkg-config])
+  fi
+
+  SUPERLU_DIST_LIBS=`PKG_CONFIG_PATH="${SUPERLU_DIST_PKG_CONFIG_PATH}" ${PKG_CONFIG} --libs --static superlu_dist 2>/dev/null`
+  if test $? -ne 0;
+  then
+    AC_MSG_ERROR([failed to query superlu_dist link flags with pkg-config])
+  fi
+
+  AC_SUBST(SUPERLU_DIST_CXXFLAGS, "${SUPERLU_DIST_CXXFLAGS}")
+  AC_SUBST(SUPERLU_DIST_LDFLAGS, "")
+  AC_SUBST(SUPERLU_DIST_LIBS, "${SUPERLU_DIST_LIBS}")
+  AC_MSG_NOTICE([ Enabling MGPROTON SuperLU_DIST solver using pkg-config for superlu_dist ])
+  AC_DEFINE([BUILD_SUPERLU_DIST], [], [Build with SuperLU_DIST])
+fi
+
+AM_CONDITIONAL(BUILD_SUPERLU_DIST,
+	[test "x${with_superlu_dist}x" != "xnox" ])
 
 ################################################################################
 # PRIMME 

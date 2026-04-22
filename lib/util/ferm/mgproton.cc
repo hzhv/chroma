@@ -10,6 +10,14 @@
 #include "util/ferm/superb_contractions.h"
 #include "util/ferm/superb_options.h"
 
+#ifdef BUILD_SUPERLU_DIST
+#  include "util/ferm/chroma_superlu_dist_wrapper.h"
+#endif
+
+#include <array>
+#include <cstring>
+#include <limits>
+#include <numeric>
 #include <set>
 
 #ifdef BUILD_SB
@@ -577,11 +585,11 @@ namespace Chroma
       r.copyTo(r0);
 
       // Do the iterations
-      auto normr = normr0.clone();	 ///< residual norms
-      unsigned int it = 0;		 ///< iteration number
-      double max_tol = HUGE_VAL;	 ///< maximum residual norm
-      unsigned int residual_updates = 0; ///< number of residual updates
-      auto p = r0.clone();		 ///< p0 = r0
+      auto normr = normr0.clone();			///< residual norms
+      unsigned int it = 0;				///< iteration number
+      double max_tol = HUGE_VAL;			///< maximum residual norm
+      unsigned int residual_updates = 0;		///< number of residual updates
+      auto p = r0.clone();				///< p0 = r0
       auto rho = contract<1>(r, r0.conj(), order_rows); // rho = r0' * r
       auto Kp = prec ? r0.make_compatible() : p;
       auto AKp = r0.make_compatible();
@@ -762,7 +770,7 @@ namespace Chroma
 	max_residual_updates = (std::is_same<COMPLEX, double>::value ||
 				std::is_same<COMPLEX, std::complex<double>>::value)
 				 ? 100
-				 : 100;
+				 : 100; // ???
 
       // Check that the operator is compatible with the input and output vectors
       if (!op.d.is_compatible(x) || !op.d.is_compatible(y))
@@ -891,6 +899,139 @@ namespace Chroma
 	QDPIO::cout << prefix << " MGPROTON MR summary #its.: " << it
 		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
 		    << " precs: " << nprecs << std::endl;
+    }
+
+    /// Solve iteratively op * y = x
+    /// using Jacobi Method (valid for diag dominant linear systems that spectrum radius < 1)
+    /// \param op: problem matrix
+    /// \param x: input right-hand-sides
+    /// \param y: the solution vectors
+    /// \param tol: maximum tolerance
+    /// \param max_its: maximum number of iterations
+    /// \param error_if_not_converged: throw an error if the tolerance was not satisfied
+    /// \param max_residual_updates: recompute residual vector every this number of restarts
+    /// \param passing_initial_guess: whether `y` contains a solution guess
+    /// \param verb: verbosity level
+    /// \param prefix: prefix printed before every line
+    ///
+    /// Method (Residual Form):
+    /// r = b - A * x  // compute initial residual
+    /// while not converge:
+    ///   x_new = x + D^{-1}r
+    ///   r = b - A * x_new
+    /// end
+    ///
+    /// A = L + D + U
+    /// Ax = b => (L + D + U)x = b  => Lx + Dx + Ux = b => Dx = b-Lx-Ux => Dx = b-(L+U)x
+    /// x_new = x + D^{-1}(b - Ax) => x_new = x + D^{-1}(b - Lx - Ux - Dx) = x + D^{-1}b - D^{-1}Lx - D^{-1}Ux - D^{-1}Dx
+    /// x_new = D^{-1}b - D^{-1}(L+U)x
+    ///
+    /// while not converge:
+    ///   T = -D^{-1}(L+U)
+    ///   C = D^{-1}b
+    ///   x_new = T x + C
+    /// end
+
+    template <std::size_t NOp, typename COMPLEX>
+    void jacobi(const Operator<NOp, COMPLEX>& op, const Tensor<NOp + 2, COMPLEX>& opDiag,
+		const std::string& blk_rows,
+		const std::string& blk_cols, /* blk_cols represent label for the input */
+		const remap& m_blk,	     /* input label => output label */
+
+		const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX>& y, double tol,
+		unsigned int max_its = 0, bool error_if_not_converged = true,
+		Verbosity verb = NoOutput, std::string prefix = "")
+    {
+      detail::log(1, prefix + " starting jacobi method");
+
+      if (op.order_t.size() > 0)
+	throw std::runtime_error("Not implemented");
+
+      // Check options
+      if (max_its == 0 && tol <= 0)
+	throw std::runtime_error("jocabi: please give a stopping criterion, either a tolerance or "
+				 "a maximum number of iterations");
+      if (max_its == 0)
+	max_its = std::numeric_limits<unsigned int>::max();
+
+      // Check that the operator is compatible with the input and output vectors
+      if (!op.d.is_compatible(x) || !op.d.is_compatible(y))
+	throw std::runtime_error(
+	  "jocabi: Either the input or the output vector isn't compatible with the "
+	  "operator");
+
+      // Get an unused label for the search subspace columns
+      std::string order_cols = detail::remove_dimensions(
+	x.order, op.i.order); // x removes the rows that matches op and remains cols
+      std::string order_rows = detail::remove_dimensions(op.d.order, op.order_t);
+      std::size_t num_cols =
+	x.volume(order_cols); // length of the column demension volumn(nN): n=10, N=2, volumn=20
+      if (num_cols == 0)
+	return;
+
+      // Counting op applications
+      unsigned int nops = 0;
+
+      // Compute FIRST residual, r = x - op * y = x
+      Tensor<NOp + 1, COMPLEX> r;
+      r = op.template make_compatible_img<NOp + 1>(
+	order_cols, x.kvdim()); // only when specify templete args when invokation
+				// now r can do matvec by op(r)
+				// x.kvdim() return all of the demensions
+      r.set_zero();
+      y.set_zero();
+
+      x.addTo(r); // r = x + r
+
+      auto normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
+      if (max(normr0) == 0)
+	return;
+
+      // Start the iteration
+      unsigned int it = 0;
+      double max_tol = HUGE_VAL;
+
+      auto p = r.make_compatible(); ///< p will hold D^{-1} * r
+
+      for (it = 0; it < max_its;)
+      {
+	// D^{-1} * r
+	solve<2, NOp + 1, NOp + 2, NOp + 1, COMPLEX>(opDiag, blk_rows, blk_cols,
+						     r.rename_dims(m_blk), blk_cols, CopyTo, p);
+	// y = y + p
+	p.addTo(y);
+	// r = x - op * y, less numerical errors?
+	// r = op(y).scale(-1);
+	op(y).scale(-1).copyTo(r); // copy into r
+	nops += num_cols;
+	x.addTo(r);
+
+	auto normr = norm<1>(r, op.order_t + order_cols);
+	max_tol = max(div(normr, normr0));
+
+	if (verb >= Detailed)
+	  QDPIO::cout << prefix << " JACOBI iteration #its.: " << it
+		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
+
+	++it;
+	if (max_tol <= tol)
+	  break;
+      }
+
+      if (error_if_not_converged)
+      {			      // last round of rel residual
+	op(y, r);	      // r = A*y
+	x.scale(-1).addTo(r); // r = -x + r
+	auto normr = norm<1>(r, op.order_t + order_cols);
+	max_tol = max(div(normr, normr0));
+	if (tol > 0 && max_tol > tol)
+	  throw std::runtime_error("jacobi didn't converge");
+      }
+
+      if (verb >= JustSummary)
+	QDPIO::cout << prefix << " JACOBI summary #its.: " << it
+		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
+		    << std::endl;
     }
 
     /// Solve iteratively op * y = x using Generalized Conjugate Residual
@@ -1428,6 +1569,59 @@ namespace Chroma
 	return r;
       }
 
+      /// Returns a Jacobi solver (Jacobi method)
+      /// \param op: operator to make the inverse of
+      /// \param ops: options to select the solver from `solvers` and influence the solver construction
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getJacobiSolver(Operator<NOp, COMPLEX> op, const Options& ops,
+					     Operator<NOp, COMPLEX> prec_)
+      {
+	if (prec_)
+	  throw std::runtime_error(
+	    "getJacobiSolver: Jacobi does not support external preconditioner");
+
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup jacobi ") + prefix);
+
+	// Get the remainder options.
+	double tol = getOption<double>(ops, "tol", 0.0);
+	unsigned int max_its = getOption<unsigned int>(ops, "max_its", 0);
+	if (max_its == 0 && tol <= 0)
+	  ops.throw_error("set either `tol` or `max_its`");
+	bool error_if_not_converged = getOption<bool>(ops, "error_if_not_converged", true);
+	unsigned int max_residual_updates = getOption<unsigned int>(ops, "max_residual_updates", 0);
+	unsigned int max_simultaneous_rhs = getOption<unsigned int>(ops, "max_simultaneous_rhs", 0);
+	Verbosity verb = getOption<Verbosity>(ops, "verbosity", getVerbosityMap(), NoOutput);
+
+	const std::string blk_rows = "cs";
+	remap m_blk = getNewLabels(blk_rows, op.d.order + op.i.order);
+	const std::string blk_cols = update_order(blk_rows, m_blk);
+
+	Tensor<NOp + 2, COMPLEX> opDiag = getBlockDiag<NOp + 2>(op, blk_rows, m_blk);
+
+	// Return the solver.
+	return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+		  Tracker _t(std::string("jacobi ") + prefix);
+		  _t.arity = x.kvdim().at('n');
+		  foreachInChuncks(
+		    x, y, max_simultaneous_rhs,
+		    [=](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+		      jacobi(op, opDiag, blk_rows, blk_cols, m_blk, x, y, tol, max_its,
+			     error_if_not_converged, verb, prefix);
+		    },
+		    'n');
+		},
+		op.i,
+		op.d,
+		nullptr,
+		op.order_t,
+		op.imgLayout,
+		op.domLayout,
+		DenseOperator(),
+		op.preferred_col_ordering,
+		false /* no Kronecker blocking */};
+      }
+
       enum class SpinSplitting {
 	None,	   // one spin output
 	Chirality, // two spin output
@@ -1439,31 +1633,6 @@ namespace Chroma
 	Full,	 // normalize the whole vectors
 	Blocking // normalize each block
       };
-
-      inline std::vector<DestroyFun>& getOperatorsCacheDestroyList();
-
-      template <std::size_t NOp, typename COMPLEX>
-      using EvenOddOperatorParts = std::tuple<Operator<NOp, COMPLEX>,	///< op_eo
-					      Operator<NOp, COMPLEX>,	///< op_oe
-					      Tensor<NOp + 2, COMPLEX>, ///< opDiagE
-					      Tensor<NOp + 2, COMPLEX>, ///< opDiagO
-					      Tensor<NOp + 2, COMPLEX>, ///< opInvDiagE
-					      Tensor<NOp + 2, COMPLEX>	///< opInvDiagO
-					      >;
-
-      /// Return the cache of block diagonals for even-odd operators generated by getEvenOddPrec
-      /// NOTE: this one is destroyed by `cleanOperatorsCache`
-
-      template <std::size_t NOp, typename COMPLEX>
-      std::map<void*, EvenOddOperatorParts<NOp, COMPLEX>>& getEvenOddOperatorsPartsCache()
-      {
-	static std::map<void*, EvenOddOperatorParts<NOp, COMPLEX>> m = []() {
-	  getOperatorsCacheDestroyList().push_back(
-	    []() { getEvenOddOperatorsPartsCache<NOp, COMPLEX>().clear(); });
-	  return std::map<void*, EvenOddOperatorParts<NOp, COMPLEX>>{};
-	}();
-	return m;
-      }
 
       /// Returns the prolongator constructed from the given operator
       /// \param op: operator to make the prolongator of
@@ -1540,29 +1709,6 @@ namespace Chroma
 	    nv = op(null_solver(b));
 	    b.scale(-1).addTo(nv);
 	    b.release();
-
-	    // If the odd part of nv is too small (because an even-odd preconditioner has
-	    // been used) or we care only about the evens sides, reconstruct the odd part
-	    // of the null vectors from the even sides as -inv(op_oo)*op_oe*nv_e
-	    if (solverSpace != FullSpace ||
-		fnorm(nv.kvslice_from_size({}, {{'X', 1}})) >
-		  10.0 * fnorm(nv.kvslice_from_size({{'X', 1}}, {{'X', 1}})))
-	    {
-	      if (getEvenOddOperatorsPartsCache<NOp, COMPLEX>().count(op.id.get()) == 0)
-	      {
-		throw std::runtime_error("not implemented");
-	      }
-	      else
-	      {
-		const auto& t = getEvenOddOperatorsPartsCache<NOp, COMPLEX>().at(op.id.get());
-		const auto& op_oe = std::get<1>(t);
-		const auto& opInvDiagO = std::get<5>(t);
-		remap m_sc{{'s', 'S'}, {'c', 'C'}};
-		contract<NOp + 1>(opInvDiagO.scale(-1),
-				  op_oe(nv.kvslice_from_size({}, {{'X', 1}})).rename_dims(m_sc),
-				  "CS", CopyTo, nv.kvslice_from_size({{'X', 1}}, {{'X', 1}}));
-	      }
-	    }
 	  }
 	  else
 	  {
@@ -1652,8 +1798,8 @@ namespace Chroma
 	      // Pre-normalize the vectors if the user asks
 	      if (null_vectors_normalization == NullVectorsNormalization::Full)
 	      {
-		nv_blk0 =
-		  vecnorm<NOp + 1 + 5 - 1>(nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
+		nv_blk0 = vecnorm<NOp + 1 + 5 - 1>(
+		  nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
 	      }
 	      else if (null_vectors_normalization == NullVectorsNormalization::Blocking)
 	      {
@@ -1794,7 +1940,7 @@ namespace Chroma
 	      if (null_vectors_normalization == NullVectorsNormalization::Full)
 	      {
 		nv_blk0 =
-		  vecnorm<NOp + 4 -1>(nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
+		  vecnorm<NOp + 4 - 1>(nv_blk0, detail::union_dimensions(nv_blk0.order, "", "c"));
 	      }
 	      else if (null_vectors_normalization == NullVectorsNormalization::Blocking)
 	      {
@@ -1913,6 +2059,31 @@ namespace Chroma
       {
 	for (const auto& f : getOperatorsCacheDestroyList())
 	  f();
+      }
+
+      /// Tuple storing the operator even-odd and odd-even parts and the block diagonal and its inverse
+
+      template <std::size_t NOp, typename COMPLEX>
+      using EvenOddOperatorParts = std::tuple<Operator<NOp, COMPLEX>,	///< op_eo
+					      Operator<NOp, COMPLEX>,	///< op_oe
+					      Tensor<NOp + 2, COMPLEX>, ///< opDiagE
+					      Tensor<NOp + 2, COMPLEX>, ///< opDiagO
+					      Tensor<NOp + 2, COMPLEX>, ///< opInvDiagE
+					      Tensor<NOp + 2, COMPLEX>	///< opInvDiagO
+					      >;
+
+      /// Return the cache of block diagonals for even-odd operators generated by getEvenOddPrec
+      /// NOTE: this one is destroyed by `cleanOperatorsCache`
+
+      template <std::size_t NOp, typename COMPLEX>
+      std::map<void*, EvenOddOperatorParts<NOp, COMPLEX>>& getEvenOddOperatorsPartsCache()
+      {
+	static std::map<void*, EvenOddOperatorParts<NOp, COMPLEX>> m = []() {
+	  getOperatorsCacheDestroyList().push_back(
+	    []() { getEvenOddOperatorsPartsCache<NOp, COMPLEX>().clear(); });
+	  return std::map<void*, EvenOddOperatorParts<NOp, COMPLEX>>{};
+	}();
+	return m;
       }
 
       /// Return a cache for the prolongators
@@ -2150,7 +2321,7 @@ namespace Chroma
       /// Returns a general deflation preconditioner
       ///
       /// It returns an approximation of Op^{-1} = Op^{-1}*Q + Op^{-1}(I-Q), where Q is a projector
-      /// on the left singular space of Op. 
+      /// on the left singular space of Op.
       /// The approximation is constructed using an oblique projector and doing the inversions
       /// approximately:
       ///   1) Q = Op*V*(W'*Op*V)^{-1}*W', where W and V are left and right singular spaces.
@@ -2291,7 +2462,6 @@ namespace Chroma
 
 	bool use_Aee_prec = getOption<bool>(ops, "use_Aee_prec", false);
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
-	Verbosity verb = getOption<Verbosity>(ops, "verbosity", getVerbosityMap(), NoOutput);
 
 	Tracker _t(std::string("setup eo solver ") + prefix);
 
@@ -2335,51 +2505,51 @@ namespace Chroma
 	Operator<NOp, COMPLEX> opA{
 	  use_Aee_prec ?
 		       // Do opA = I - Op_eo * Op_oo^{-1} * Op_oe * Op_ee^{-1} if use_Aee_prec
-	    OperatorFun<NOp, COMPLEX>(
-	      [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-		foreachInChuncks(
-		  x, y, create_operator_max_rhs,
-		  [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
-		    Tracker _t(std::string("eo matvec Aee_prec ") + prefix);
+	    OperatorFun<NOp, COMPLEX>([=](const Tensor<NOp + 1, COMPLEX>& x,
+					  Tensor<NOp + 1, COMPLEX> y) {
+	      foreachInChuncks(x, y, create_operator_max_rhs,
+			       [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+				 Tracker _t(std::string("eo matvec Aee_prec ") + prefix);
 
-		    // y = x
-		    x.copyTo(y);
+				 // y = x
+				 x.copyTo(y);
 
-		    // y0 = Op_ee^{-1} * x
-		    auto y0 = contract<NOp + 1>(opInvDiagE, x.rename_dims(m_sc), "CS");
+				 // y0 = Op_ee^{-1} * x
+				 auto y0 = contract<NOp + 1>(opInvDiagE, x.rename_dims(m_sc), "CS");
 
-		    // y1 = Op_oe * y0
-		    auto y1 = op_oe(std::move(y0));
+				 // y1 = Op_oe * y0
+				 auto y1 = op_oe(std::move(y0));
 
-		    // y2 = Op_oo^{-1} * y1
-		    auto y2 = contract<NOp + 1>(opInvDiagO, std::move(y1).rename_dims(m_sc), "CS");
+				 // y2 = Op_oo^{-1} * y1
+				 auto y2 = contract<NOp + 1>(opInvDiagO,
+							     std::move(y1).rename_dims(m_sc), "CS");
 
-		    // y += -Op_eo * y2
-		    op_eo(std::move(y2)).scale(-1).addTo(y);
-		  });
-	      })
+				 // y += -Op_eo * y2
+				 op_eo(std::move(y2)).scale(-1).addTo(y);
+			       });
+	    })
 		       :
 		       // Otherwise, do opA = Op_ee - Op_eo * Op_oo^{-1} * Op_oe
-	    OperatorFun<NOp, COMPLEX>(
-	      [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-		foreachInChuncks(x, y, create_operator_max_rhs,
-				 [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
-				   Tracker _t(std::string("eo matvec ") + prefix);
+	    OperatorFun<NOp, COMPLEX>([=](const Tensor<NOp + 1, COMPLEX>& x,
+					  Tensor<NOp + 1, COMPLEX> y) {
+	      foreachInChuncks(x, y, create_operator_max_rhs,
+			       [&](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+				 Tracker _t(std::string("eo matvec ") + prefix);
 
-				   // y = Op_ee * x
-				   contract(opDiagE, x.rename_dims(m_sc), "CS", CopyTo, y);
+				 // y = Op_ee * x
+				 contract(opDiagE, x.rename_dims(m_sc), "CS", CopyTo, y);
 
-				   // y1 = Op_oe * x
-				   auto y1 = op_oe(x);
+				 // y1 = Op_oe * x
+				 auto y1 = op_oe(x);
 
-				   // y2 = Op_oo^{-1} * y1
-				   auto y2 = contract<NOp + 1>(
-				     opInvDiagO, std::move(y1).rename_dims(m_sc), "CS");
+				 // y2 = Op_oo^{-1} * y1
+				 auto y2 = contract<NOp + 1>(opInvDiagO,
+							     std::move(y1).rename_dims(m_sc), "CS");
 
-				   // y += -Op_eo * y2
-				   op_eo(std::move(y2)).scale(-1).addTo(y);
-				 });
-	      }),
+				 // y += -Op_eo * y2
+				 op_eo(std::move(y2)).scale(-1).addTo(y);
+			       });
+	    }),
 	  op.d.kvslice_from_size({{'X', 0}}, {{'X', 1}}),
 	  op.i.kvslice_from_size({{'X', 0}}, {{'X', 1}}),
 	  nullptr,
@@ -2457,43 +2627,8 @@ namespace Chroma
 	      auto yo0 = be;
 	      x.kvslice_from_size({{'X', 1}}, {{'X', 1}}).copyTo(yo0);
 	      op_oe(ye).scale(-1).addTo(yo0);
-	      contract<NOp + 1>(opInvDiagO,
-				yo0.rename_dims(m_sc), "CS", CopyTo,
+	      contract<NOp + 1>(opInvDiagO, yo0.rename_dims(m_sc), "CS", CopyTo,
 				y.kvslice_from_size({{'X', 1}}, {{'X', 1}}));
-	    }
-
-	    // Compute the residual norm
-	    if (verb >= JustSummary)
-	    {
-	      // r = x - op*y
-	      auto ym = y.scale(-1);
-	      auto yme = ym.kvslice_from_size({{'X', 0}}, {{'X', 1}});
-	      auto ymo = ym.kvslice_from_size({{'X', 1}}, {{'X', 1}});
-	      auto r = x.clone();
-	      auto re = r.kvslice_from_size({{'X', 0}}, {{'X', 1}});
-	      contract(opDiagE, yme.rename_dims(m_sc), "CS", AddTo, re);
-	      op_eo(ymo).addTo(re);
-	      std::string order_cols = detail::remove_dimensions(x.order, op_eo.i.order);
-	      if (solverSpace == FullSpace)
-	      {
-		auto ro = r.kvslice_from_size({{'X', 1}}, {{'X', 1}});
-		contract(opDiagO, ymo.rename_dims(m_sc), "CS", AddTo, ro);
-		op_oe(yme).addTo(ro);
-		auto normx = norm<1>(x, op_eo.order_t + order_cols);
-		auto normr = norm<1>(r, op_eo.order_t + order_cols);
-		double max_tol = max(div(normr, normx));
-		QDPIO::cout << prefix << " MGPROTON EO error in full residual vector: "
-			    << detail::tostr(max_tol) << std::endl;
-	      }
-	      else
-	      {
-		auto normx =
-		  norm<1>(x.kvslice_from_size({{'X', 0}}, {{'X', 1}}), op_eo.order_t + order_cols);
-		auto normr = norm<1>(re, op_eo.order_t + order_cols);
-		double max_tol = max(div(normr, normx));
-		QDPIO::cout << prefix << " MGPROTON EO error in even residual vector: "
-			    << detail::tostr(max_tol) << std::endl;
-	      }
 	    }
 	  },
 	  op.i,
@@ -2628,7 +2763,6 @@ namespace Chroma
 	      .copyTo(y);
 	  },
 	  eg_d, eg_i, nullptr, op};
-
 
 	// Get solver on op_oo
 	const auto solver_oo = getSolver(op_oo, getOptions(ops, "solver_oo"));
@@ -3301,6 +3435,1346 @@ namespace Chroma
 	}
       }
 
+      /// Jacobi preconditioner (alias to block-Jacobi with default blocking)
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getJacobi(Operator<NOp, COMPLEX> op, const Options& ops,
+				       Operator<NOp, COMPLEX> prec_)
+      {
+	if (prec_)
+	  throw std::runtime_error("getJacobi: unsupported input preconditioner");
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup jacobi solver ") + prefix);
+
+	// Get the blocking
+	auto dim = op.d.kvdim();
+	std::vector<unsigned int> blocking{1u, 1u, 1u, 1u};
+	// std::vector<unsigned int> blocking =
+	// getOption<std::vector<unsigned int>>(ops, "blocking", default_blocking);
+	if (blocking.size() != Nd)
+	  ops.getValue("blocking")
+	    .throw_error("getBlocking: the blocking should be a vector with four elements");
+	std::map<char, unsigned int> mblk{
+	  {'x', blocking[0]}, {'y', blocking[1]}, {'z', blocking[2]}, {'t', blocking[3]}};
+
+	// Get the block diagonal of the operator with rows cs and columns CS
+	const std::string blk_rows = "cs"; // order of the block of rows to invert
+	remap m_blk = getNewLabels(blk_rows, op.d.order + op.i.order); // column labels
+	const std::string blk_cols =
+	  update_order(blk_rows, m_blk); // order of the block of columns to invert
+	Tensor<NOp + 2, COMPLEX> opDiag = getBlockDiag<NOp + 2>(op, blk_rows, m_blk);
+
+	// Return the solver
+	return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+		  // y = Op_diag^{-1} * x
+		  solve<2, NOp + 1, NOp + 2, NOp + 1, COMPLEX>(
+		    opDiag, blk_rows, blk_cols, x.rename_dims(m_blk), blk_cols, CopyTo, y);
+		},
+		op.d, op.i, nullptr, op};
+      }
+
+      template <std::size_t NOp>
+      std::array<int, NOp> coorToArray(const Coor<NOp>& c)
+      {
+	std::array<int, NOp> out{};
+	std::copy_n(c.begin(), NOp, out.begin());
+	return out;
+      }
+
+      template <std::size_t NOp, typename COMPLEX>
+      struct ExplicitLocalBlockRows {
+	struct RowBlock {
+	  Coor<NOp> dom_coor{};
+	  std::vector<COMPLEX> data;
+	};
+
+	SpTensor<NOp, NOp, COMPLEX> sp;
+	std::string row_labels;
+	std::string col_labels;
+	std::size_t nrows = 0;
+	std::size_t bs = 0;
+	std::array<unsigned int, NOp> img_to_dom_pos{};
+	std::vector<Coor<NOp>> row_local_coors;
+	std::vector<Coor<NOp>> row_global_coors;
+	std::vector<Coor<NOp>> dense_img_coors;
+	std::vector<Coor<NOp>> dense_dom_coors;
+	std::vector<std::vector<RowBlock>> rows;
+      };
+
+      template <std::size_t NOp, typename COMPLEX>
+      ExplicitLocalBlockRows<NOp, COMPLEX>
+      extractExplicitLocalBlockRows(const SpTensor<NOp, NOp, COMPLEX>& sp, const remap& rd,
+				    const std::string& solver_name)
+      {
+	if (!sp)
+	  throw std::runtime_error(solver_name + ": empty sparse operator");
+	if (sp.isImgFastInBlock)
+	  throw std::runtime_error(solver_name +
+				   ": unsupported sparse format with fast image in block");
+
+	ExplicitLocalBlockRows<NOp, COMPLEX> out;
+	out.sp = sp;
+	out.row_labels =
+	  std::string(sp.i.order.begin(), sp.i.order.begin() + sp.nblocki + sp.nkroni);
+	out.col_labels =
+	  std::string(sp.d.order.begin(), sp.d.order.begin() + sp.nblockd + sp.nkrond);
+
+	for (unsigned int p = 0; p < NOp; ++p)
+	{
+	  char img_label = sp.i.order[p];
+	  char dom_label = rd.at(img_label);
+	  auto pos = sp.d.order.find(dom_label);
+	  if (pos == std::string::npos)
+	    throw std::runtime_error(solver_name +
+				     ": failed to map image labels into domain labels");
+	  out.img_to_dom_pos[p] = (unsigned int)pos;
+	}
+
+	out.bs = 1;
+	for (char c : out.row_labels)
+	  out.bs *= (std::size_t)sp.i.kvdim().at(c);
+	if (out.bs == 0 || out.bs != (std::size_t)volume(sp.d.kvdim(), out.col_labels))
+	  throw std::runtime_error(solver_name + ": unsupported non-square dense block shape");
+
+	auto ii_host =
+	  (sp.ii.isSubtensor() ? sp.ii.cloneOn(OnHost) : sp.ii.make_sure(none, OnHost)).getLocal();
+	auto jj_host =
+	  (sp.jj.isSubtensor() ? sp.jj.cloneOn(OnHost) : sp.jj.make_sure(none, OnHost)).getLocal();
+	auto data_host =
+	  (sp.data.isSubtensor() ? sp.data.cloneOn(OnHost) : sp.data.make_sure(none, OnHost))
+	    .getLocal();
+
+	const auto row_size = detail::to_kv(sp.i.order, sp.blki);
+	const auto row_strides =
+	  superbblas::detail::get_strides<Index>(ii_host.size, superbblas::FastToSlow);
+	const auto i_local_from = sp.i.p->localFrom();
+	const int* ii_ptr = ii_host.data();
+	const Coor<NOp>* jj_ptr = reinterpret_cast<const Coor<NOp>*>(jj_host.data());
+
+	out.nrows = ii_host.volume();
+	out.row_local_coors.resize(out.nrows);
+	out.row_global_coors.resize(out.nrows);
+	out.dense_img_coors.resize(out.bs);
+	out.dense_dom_coors.resize(out.bs);
+	out.rows.resize(out.nrows);
+
+	for (std::size_t b = 0; b < out.bs; ++b)
+	{
+	  Coor<NOp> img_block_coor{{}};
+	  Coor<NOp> dom_block_coor{{}};
+	  std::size_t t = b;
+	  for (char c : out.row_labels)
+	  {
+	    int s = sp.i.kvdim().at(c);
+	    int v = (int)(t % (std::size_t)s);
+	    t /= (std::size_t)s;
+	    unsigned int img_pos = (unsigned int)sp.i.order.find(c);
+	    img_block_coor[img_pos] = v;
+	    dom_block_coor[out.img_to_dom_pos[img_pos]] = v;
+	  }
+	  out.dense_img_coors[b] = img_block_coor;
+	  out.dense_dom_coors[b] = dom_block_coor;
+	}
+
+	std::size_t col0 = 0;
+	for (std::size_t row_idx = 0; row_idx < out.nrows; ++row_idx)
+	{
+	  using superbblas::detail::operator+;
+	  const auto row_local_coor =
+	    superbblas::detail::index2coor((Index)row_idx, ii_host.size, row_strides);
+	  out.row_local_coors[row_idx] = row_local_coor;
+	  out.row_global_coors[row_idx] = row_local_coor + i_local_from;
+
+	  const auto row_from = detail::to_kv(ii_host.order, row_local_coor);
+	  const auto data_row = data_host.kvslice_from_size(row_from, row_size);
+	  auto& row = out.rows[row_idx];
+	  for (std::size_t col = 0, num_nz = ii_ptr[row_idx]; col < num_nz; ++col, ++col0)
+	  {
+	    auto dom_coor = jj_ptr[col0];
+	    for (unsigned int q = 0; q < sp.nblockd + sp.nkrond; ++q)
+	      dom_coor[q] = 0;
+
+	    auto blk_src =
+	      data_row.kvslice_from_size({{'u', (int)col}}, {{'u', 1}}).make_sure(none, OnHost);
+	    const std::string extra_labels =
+	      detail::remove_dimensions(blk_src.order, out.row_labels + out.col_labels);
+
+	    std::vector<COMPLEX> block(out.bs * out.bs, COMPLEX{});
+	    for (char lbl : extra_labels)
+	      if (blk_src.kvdim().at(lbl) != 1)
+		throw std::runtime_error(solver_name +
+					 ": unexpected non-singleton leftover label `" +
+					 std::string(1, lbl) +
+					 "` while flattening explicit sparse "
+					 "block");
+
+	    std::map<char, unsigned int> blk_pos;
+	    for (unsigned int p = 0; p < blk_src.order.size(); ++p)
+	      blk_pos[blk_src.order[p]] = p;
+
+	    for (std::size_t r = 0; r < out.bs; ++r)
+	      for (std::size_t c = 0; c < out.bs; ++c)
+	      {
+		Coor<2 * NOp + 1> elem{{}};
+
+		std::size_t tr = r;
+		for (char lbl : out.row_labels)
+		{
+		  int s = sp.i.kvdim().at(lbl);
+		  elem[blk_pos.at(lbl)] = (int)(tr % (std::size_t)s);
+		  tr /= (std::size_t)s;
+		}
+
+		std::size_t tc = c;
+		for (char lbl : out.col_labels)
+		{
+		  int s = sp.d.kvdim().at(lbl);
+		  elem[blk_pos.at(lbl)] = (int)(tc % (std::size_t)s);
+		  tc /= (std::size_t)s;
+		}
+
+		block[r * out.bs + c] = sp.scalar * blk_src.get(elem);
+	      }
+
+	    row.push_back({dom_coor, std::move(block)});
+	  }
+	}
+
+	return out;
+      }
+
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> ilu0(Operator<NOp, COMPLEX> op, const Options& ops);
+
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getILU0(Operator<NOp, COMPLEX> op, const Options& ops,
+				     Operator<NOp, COMPLEX> prec_)
+      {
+	if (prec_)
+	  throw std::runtime_error("getILU0: unsupported input preconditioner");
+	return ilu0(op, ops);
+      }
+
+      /// Returns a block CSR ILU(0) preconditioner
+      /*
+	function [l,u] = ilu0_colors(a, p, bs)
+	%% implictly ilu0(A-colored)
+		% [a00 a01] = [l00 0  ] [u00 u01] = [l00*u00  l00*u01        ]
+		% [a10 a11]   [l10 l11] [0   u11]   [l10*u00  l10*u01+l11*u11]
+		% [l00,u00] = lu(a00)
+		% u01 = l00\a01
+		% l10 = a10/u00
+		% l11*u11 = a11 - l10*u01 = a11 - (a10/u00)*(l00\a01)
+
+		if nargin<=2, bs=1; end
+		n = size(a,1);
+		assert(numel(p) == n)
+
+		[ii,jj,~] = find(a);
+		o = zeros(numel(ii),1);
+		f = @(x) floor((x-1)/bs);
+		iiu = f(ii) <= f(jj);
+		u = sparse(ii(iiu),jj(iiu), o(iiu), n,n);
+		iil = f(ii) > f(jj);
+		l = sparse(ii(iil),jj(iil), o(iil), n,n, numel(iil)+n);
+
+		colors = sort(unique(p));
+		for c=colors(:)'
+			n0 = nnz(p == c);
+			% l_00, u_00, u_01, l_10
+			l(p == c, p == c) = speye(n0);        % l_00
+			u(p == c, p == c) = blkdiag(a(p == c, p == c), bs); %u_00
+			u(p == c, p > c) = a(p == c, p > c);  % u_01
+			l(p > c, p == c) = a(p > c, p == c) * invblkdiag(u(p == c, p == c), bs); % l_10=a_10*inv(u_00)
+													
+			ij1 = p(ii) > c & p(jj) > c; % a_11 nonzero index
+			ii1 = ii(ij1);
+			jj1 = jj(ij1);
+			b1 = unique(floor((ii1-1)/bs) + floor((jj1-1)/bs)*(n/bs));
+			% update all blocks
+			for i=b1(:)'                    % block idx
+				i0 = mod(i,n/bs)*bs+(1:bs); % global idx
+				j0 = floor(i/(n/bs))*bs+(1:bs);
+				a(i0,j0) = a(i0,j0) - l(i0, p == c) * u(p == c, j0);
+			end
+		end
+	end
+	*/
+      /// \param op: operator to precondition (must be square)
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> ilu0(Operator<NOp, COMPLEX> op, const Options& ops)
+      {
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup ILU0 solver ") + prefix);
+
+	if (!op.d.is_compatible(op.i))
+	  throw std::runtime_error("ILU0: only square operators are supported");
+
+	// Work on local data only. ilu(0) intentionally approximates only
+	// the rank-local matrix extracted from the sparse operator.
+	auto t = cloneOperatorToSpTensor(op, getFurthestNeighborDistance(op), RowMajor, false,
+					 std::string("ILU0 ") + prefix);
+	auto sp = t.first; // block CSR format
+
+	if (!sp)
+	  throw std::runtime_error("ILU0: empty sparse operator");
+	if (sp.isImgFastInBlock)
+	  throw std::runtime_error("ILU0: unsupported sparse format with fast image in block");
+
+	// Local block-CSR extraction from SpTensor
+	auto local_blocks = extractExplicitLocalBlockRows(sp, t.second, "ILU0");
+	auto x_pos = local_blocks.sp.i.order.find('X');
+	bool explicit_two_color =
+	  x_pos != std::string::npos && local_blocks.sp.i.kvdim().count('X') == 1 &&
+	  local_blocks.sp.i.kvdim().at('X') == 2 && detail::isEvenOddLayout(op.imgLayout) &&
+	  detail::isEvenOddLayout(op.domLayout);
+
+	struct RowBlock {
+	  int col = -1;
+	  std::vector<COMPLEX> data;
+	};
+
+	// Compact factor storage for the explicit 2-color factorization:
+	//   L = [ I   0 ]
+	//       [L10  I ]
+	//   U = [U00 U01]
+	//       [ 0  U11]
+	struct ILUBlockData {
+	  std::size_t nrows = 0;
+	  std::size_t bs = 0;
+	  bool use_two_color = false;
+	  std::vector<Coor<NOp>> row_coors;
+	  std::vector<Coor<NOp>> dense_coors;
+	  std::vector<int> rows0;
+	  std::vector<int> rows1;
+	  std::vector<std::vector<RowBlock>> U01;
+	  std::vector<std::vector<RowBlock>> L10;
+	  std::vector<std::vector<RowBlock>> Lrows;
+	  std::vector<std::vector<RowBlock>> Urows;
+	  std::vector<std::vector<COMPLEX>> UdiagInv;
+	};
+	auto ilu = std::make_shared<ILUBlockData>();
+	ilu->nrows = local_blocks.nrows;
+	ilu->bs = local_blocks.bs;
+	ilu->row_coors = local_blocks.row_local_coors;
+	ilu->dense_coors = local_blocks.dense_img_coors;
+	ilu->U01.resize(ilu->nrows);
+	ilu->L10.resize(ilu->nrows);
+	ilu->Lrows.resize(ilu->nrows);
+	ilu->Urows.resize(ilu->nrows);
+	ilu->UdiagInv.assign(ilu->nrows,
+			     std::vector<COMPLEX>(local_blocks.bs * local_blocks.bs, COMPLEX{}));
+
+	auto color_of = [&](std::size_t row) {
+	  return x_pos == std::string::npos ? -1 : ilu->row_coors[row][x_pos];
+	};
+	auto mat_mul_into = [&](const std::vector<COMPLEX>& A, const std::vector<COMPLEX>& B,
+				std::vector<COMPLEX>& C) {
+	  C.assign(local_blocks.bs * local_blocks.bs, COMPLEX{});
+	  for (std::size_t i = 0; i < local_blocks.bs; ++i)
+	    for (std::size_t k = 0; k < local_blocks.bs; ++k)
+	    {
+	      COMPLEX aik = A[i * local_blocks.bs + k];
+	      for (std::size_t j = 0; j < local_blocks.bs; ++j)
+		C[i * local_blocks.bs + j] += aik * B[k * local_blocks.bs + j];
+	    }
+	};
+	auto mat_submul = [&](std::vector<COMPLEX>& C, const std::vector<COMPLEX>& A,
+			      const std::vector<COMPLEX>& B) {
+	  for (std::size_t i = 0; i < local_blocks.bs; ++i)
+	    for (std::size_t k = 0; k < local_blocks.bs; ++k)
+	    {
+	      COMPLEX aik = A[i * local_blocks.bs + k];
+	      for (std::size_t j = 0; j < local_blocks.bs; ++j)
+		C[i * local_blocks.bs + j] -= aik * B[k * local_blocks.bs + j];
+	    }
+	};
+	auto finite_block = [&](const std::vector<COMPLEX>& block) {
+	  for (const auto& v : block)
+	    if (!std::isfinite(std::real(v)) || !std::isfinite(std::imag(v)))
+	      return false;
+	  return true;
+	};
+
+	// Build row_map: local domain block coordinate -> local row index.
+	// This lets us translate the local BSR column coordinates into row ids.
+	std::map<std::array<int, NOp>, int> row_map;
+	for (std::size_t row_idx = 0; row_idx < ilu->nrows; ++row_idx)
+	{
+	  std::array<int, NOp> dom_key{};
+	  for (unsigned int p = 0; p < NOp; ++p)
+	    dom_key[local_blocks.img_to_dom_pos[p]] = local_blocks.row_global_coors[row_idx][p];
+	  row_map[dom_key] = (int)row_idx;
+
+	  if (explicit_two_color)
+	  {
+	    int color = color_of(row_idx);
+	    if (color == 0)
+	      ilu->rows0.push_back((int)row_idx);
+	    else if (color == 1)
+	      ilu->rows1.push_back((int)row_idx);
+	    else
+	      explicit_two_color = false;
+	  }
+	}
+
+	// Materialize the local matrix in block form: Arows[i][j] is a bs x bs dense block.
+	// Only existing local BSR nonzeros are inserted, preserving the ILU(0) pattern.
+	std::vector<std::vector<RowBlock>> Arows(ilu->nrows);
+	std::vector<std::map<int, std::size_t>> ArowPos(ilu->nrows);
+	for (std::size_t row_idx = 0; row_idx < ilu->nrows; ++row_idx)
+	{
+	  for (const auto& entry : local_blocks.rows[row_idx])
+	  {
+	    std::array<int, NOp> dom_key = coorToArray(entry.dom_coor);
+	    auto it_col = row_map.find(dom_key);
+	    if (it_col == row_map.end())
+	      continue;
+	    int col_idx = it_col->second;
+	    Arows[row_idx].push_back({col_idx, entry.data});
+	  }
+	  auto& row = Arows[row_idx];
+	  std::sort(row.begin(), row.end(),
+		    [](const RowBlock& a, const RowBlock& b) { return a.col < b.col; });
+	  for (std::size_t pos = 0; pos < row.size(); ++pos)
+	    ArowPos[row_idx][row[pos].col] = pos;
+	}
+
+	bool has_same_color_offdiag = false;
+	if (explicit_two_color)
+	{
+	  for (std::size_t i = 0; i < ilu->nrows && !has_same_color_offdiag; ++i)
+	  {
+	    for (const auto& entry : Arows[i])
+	    {
+	      if (entry.col != (int)i && color_of((std::size_t)entry.col) == color_of(i))
+	      {
+		has_same_color_offdiag = true;
+		break;
+	      }
+	    }
+	  }
+	}
+	ilu->use_two_color = explicit_two_color && !has_same_color_offdiag;
+	detail::log(1, prefix + (ilu->use_two_color ? " using 2-color ILU0"
+						    : " using generic block ILU(0) fallback"));
+
+	auto invert_block = [&](const std::vector<COMPLEX>& block, const std::string& name) {
+	  Tensor<3, COMPLEX> diag("rcu", Coor<3>{{(int)local_blocks.bs, (int)local_blocks.bs, 1}},
+				  OnHost, Local);
+	  diag.set_zero();
+	  for (std::size_t r = 0; r < local_blocks.bs; ++r)
+	    for (std::size_t c = 0; c < local_blocks.bs; ++c)
+	      diag.set({{(int)r, (int)c, 0}}, block[r * local_blocks.bs + c]);
+
+	  Tensor<3, COMPLEX> diagInv;
+	  try
+	  {
+	    diagInv = inv(diag, "r", "c").make_sure("rcu", OnHost, Local);
+	  } catch (const std::exception& e)
+	  {
+	    throw std::runtime_error("ILU0: failed to invert " + name + " block: " + e.what());
+	  }
+
+	  std::vector<COMPLEX> out(local_blocks.bs * local_blocks.bs, COMPLEX{});
+	  for (std::size_t r = 0; r < local_blocks.bs; ++r)
+	    for (std::size_t c = 0; c < local_blocks.bs; ++c)
+	      out[r * local_blocks.bs + c] = diagInv.get({{(int)r, (int)c, 0}});
+	  if (!finite_block(out))
+	    throw std::runtime_error("ILU0: singular diagonal " + name + " block");
+	  return out;
+	};
+
+	auto invert_diag_blocks = [&](const std::vector<int>& rows, const std::string& name) {
+	  for (int row : rows)
+	  {
+	    auto it_diag = ArowPos[(std::size_t)row].find(row);
+	    if (it_diag == ArowPos[(std::size_t)row].end())
+	      throw std::runtime_error("ILU0: missing diagonal block on local row " +
+				       std::to_string(row) + " (" + name + ")");
+	    ilu->UdiagInv[(std::size_t)row] = invert_block(
+	      Arows[(std::size_t)row][it_diag->second].data, name + " row " + std::to_string(row));
+	  }
+	};
+
+	if (ilu->use_two_color)
+	{
+	  invert_diag_blocks(ilu->rows0, "color-0");
+
+	  for (int row : ilu->rows0)
+	  {
+	    auto& U01row = ilu->U01[(std::size_t)row];
+	    for (const auto& entry : Arows[(std::size_t)row])
+	      if (color_of((std::size_t)entry.col) == 1)
+		U01row.push_back(entry);
+	  }
+
+	  for (int row : ilu->rows1)
+	  {
+	    auto it_diag = ArowPos[(std::size_t)row].find(row);
+	    if (it_diag == ArowPos[(std::size_t)row].end())
+	      throw std::runtime_error("ILU0: missing diagonal block on local row " +
+				       std::to_string(row) + " (color-1)");
+
+	    auto& L10row = ilu->L10[(std::size_t)row];
+	    for (const auto& entry : Arows[(std::size_t)row])
+	    {
+	      if (color_of((std::size_t)entry.col) != 0)
+		continue;
+	      RowBlock lij;
+	      lij.col = entry.col;
+	      mat_mul_into(entry.data, ilu->UdiagInv[(std::size_t)entry.col], lij.data);
+	      L10row.push_back(std::move(lij));
+	    }
+
+	    auto& U11 = Arows[(std::size_t)row][it_diag->second].data;
+	    for (const auto& lij : L10row)
+	    {
+	      const auto& U01row = ilu->U01[(std::size_t)lij.col];
+	      auto it_u01 = std::find_if(U01row.begin(), U01row.end(),
+					 [&](const RowBlock& entry) { return entry.col == row; });
+	      if (it_u01 != U01row.end())
+		mat_submul(U11, lij.data, it_u01->data);
+	    }
+	  }
+
+	  invert_diag_blocks(ilu->rows1, "color-1");
+	}
+	else
+	{
+	  auto factorRows = Arows;
+	  auto factorPos = ArowPos;
+	  for (std::size_t i = 0; i < ilu->nrows; ++i)
+	  {
+	    auto& row = factorRows[i];
+	    auto& rowPos = factorPos[i];
+	    for (std::size_t pos = 0; pos < row.size(); ++pos)
+	    {
+	      int j = row[pos].col;
+	      if (j >= (int)i)
+		break;
+	      RowBlock lij;
+	      lij.col = j;
+	      mat_mul_into(row[pos].data, ilu->UdiagInv[(std::size_t)j], lij.data);
+	      row[pos].data = lij.data;
+	      ilu->Lrows[i].push_back(lij);
+
+	      for (const auto& ujk : ilu->Urows[(std::size_t)j])
+	      {
+		auto it = rowPos.find(ujk.col);
+		if (it != rowPos.end())
+		  mat_submul(row[it->second].data, lij.data, ujk.data);
+	      }
+	    }
+
+	    auto it_diag = rowPos.find((int)i);
+	    if (it_diag == rowPos.end())
+	      throw std::runtime_error("ILU0: missing diagonal block on local row " +
+				       std::to_string(i) + " (generic)");
+	    ilu->UdiagInv[i] =
+	      invert_block(row[it_diag->second].data, "generic row " + std::to_string(i));
+
+	    for (const auto& entry : row)
+	      if (entry.col > (int)i)
+		ilu->Urows[i].push_back(entry);
+	  }
+	}
+
+	return Operator<NOp, COMPLEX>{
+	  [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+	    std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
+	    std::size_t nrhs = x.volume(order_cols);
+	    if (nrhs == 0)
+	      return;
+	    auto xh = x.make_sure(local_blocks.sp.i.order + order_cols, OnHost);
+	    auto yh = y.make_compatible(local_blocks.sp.i.order + order_cols, {}, OnHost);
+	    yh.set_zero();
+	    auto x_local = xh.getLocal();
+	    auto y_local = yh.getLocal();
+
+	    std::vector<COMPLEX> z((std::size_t)ilu->nrows * ilu->bs * nrhs, COMPLEX{});
+	    std::vector<COMPLEX> yy((std::size_t)ilu->nrows * ilu->bs * nrhs, COMPLEX{});
+	    std::vector<COMPLEX> tmp(ilu->bs * nrhs, COMPLEX{});
+
+	    const COMPLEX* xptr = x_local.data();
+	    COMPLEX* yptr = y_local.data();
+	    const auto full_strides =
+	      superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
+
+	    const std::string rhs_order = order_cols;
+	    // Precompute memory offsets of RHS columns in xh/yh.
+	    std::vector<std::size_t> rhs_off(nrhs, 0);
+	    if (rhs_order.empty())
+	    {
+	      rhs_off[0] = 0;
+	    }
+	    else
+	    {
+	      std::vector<int> rhs_sizes;
+	      rhs_sizes.reserve(rhs_order.size());
+	      for (char c : rhs_order)
+		rhs_sizes.push_back(x_local.kvdim().at(c));
+	      for (std::size_t c = 0; c < nrhs; ++c)
+	      {
+		std::size_t off = 0;
+		std::size_t tcol = c;
+		for (std::size_t k = 0; k < rhs_order.size(); ++k)
+		{
+		  int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
+		  tcol /= (std::size_t)rhs_sizes[k];
+		  unsigned int p = (unsigned int)x_local.order.find(rhs_order[k]);
+		  off += (std::size_t)v * full_strides[p];
+		}
+		rhs_off[c] = off;
+	      }
+	    }
+
+	    // Precompute offsets for entries inside each dense bs-sized block.
+	    std::vector<std::size_t> dense_off(ilu->bs, 0);
+	    for (std::size_t b = 0; b < ilu->bs; ++b)
+	    {
+	      std::size_t off = 0;
+	      for (unsigned int p = 0; p < NOp; ++p)
+		off += (std::size_t)ilu->dense_coors[b][p] * full_strides[p];
+	      dense_off[b] = off;
+	    }
+
+	    // Precompute offsets for each block-row anchor in tensor storage.
+	    std::vector<std::size_t> row_off(ilu->nrows, 0);
+	    for (std::size_t i = 0; i < ilu->nrows; ++i)
+	    {
+	      std::size_t off = 0;
+	      for (unsigned int p = 0; p < NOp; ++p)
+		off += (std::size_t)ilu->row_coors[i][p] * full_strides[p];
+	      row_off[i] = off;
+	    }
+
+	    auto zref = [&](std::size_t i, std::size_t b, std::size_t c) -> COMPLEX& {
+	      return z[(i * ilu->bs + b) * nrhs + c];
+	    };
+	    auto yref = [&](std::size_t i, std::size_t b, std::size_t c) -> COMPLEX& {
+	      return yy[(i * ilu->bs + b) * nrhs + c];
+	    };
+
+	    if (ilu->use_two_color)
+	    {
+	      // z0 = x0
+	      for (int row : ilu->rows0)
+	      {
+		std::size_t i = (std::size_t)row;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+	      }
+
+	      // z1 = x1 - L10 * z0
+	      for (int row : ilu->rows1)
+	      {
+		std::size_t i = (std::size_t)row;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+		for (const auto& it : ilu->L10[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Lij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Lij[r * ilu->bs + k] * zref(j, k, c);
+		      zref(i, r, c) -= acc;
+		    }
+		}
+	      }
+
+	      // y1 = inv(U11) * z1
+	      for (int row : ilu->rows1)
+	      {
+		std::size_t i = (std::size_t)row;
+		std::fill(tmp.begin(), tmp.end(), COMPLEX{});
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    for (std::size_t k = 0; k < ilu->bs; ++k)
+		      tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * zref(i, k, c);
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, r, c) = tmp[r * nrhs + c];
+	      }
+
+	      // y0 = inv(U00) * (x0 - U01 * y1)
+	      for (int row : ilu->rows0)
+	      {
+		std::size_t i = (std::size_t)row;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, b, c) = zref(i, b, c);
+		for (const auto& it : ilu->U01[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Uij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Uij[r * ilu->bs + k] * yref(j, k, c);
+		      yref(i, r, c) -= acc;
+		    }
+		}
+		std::fill(tmp.begin(), tmp.end(), COMPLEX{});
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    for (std::size_t k = 0; k < ilu->bs; ++k)
+		      tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * yref(i, k, c);
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, r, c) = tmp[r * nrhs + c];
+	      }
+	    }
+	    else
+	    {
+	      for (std::size_t i = 0; i < ilu->nrows; ++i)
+	      {
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    zref(i, b, c) = xptr[row_off[i] + dense_off[b] + rhs_off[c]];
+		for (const auto& it : ilu->Lrows[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Lij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Lij[r * ilu->bs + k] * zref(j, k, c);
+		      zref(i, r, c) -= acc;
+		    }
+		}
+	      }
+
+	      for (std::size_t ii = ilu->nrows; ii-- > 0;)
+	      {
+		std::size_t i = ii;
+		for (std::size_t b = 0; b < ilu->bs; ++b)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, b, c) = zref(i, b, c);
+		for (const auto& it : ilu->Urows[i])
+		{
+		  std::size_t j = (std::size_t)it.col;
+		  const auto& Uij = it.data;
+		  for (std::size_t r = 0; r < ilu->bs; ++r)
+		    for (std::size_t c = 0; c < nrhs; ++c)
+		    {
+		      COMPLEX acc = COMPLEX{};
+		      for (std::size_t k = 0; k < ilu->bs; ++k)
+			acc += Uij[r * ilu->bs + k] * yref(j, k, c);
+		      yref(i, r, c) -= acc;
+		    }
+		}
+		std::fill(tmp.begin(), tmp.end(), COMPLEX{});
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    for (std::size_t k = 0; k < ilu->bs; ++k)
+		      tmp[r * nrhs + c] += ilu->UdiagInv[i][r * ilu->bs + k] * yref(i, k, c);
+		for (std::size_t r = 0; r < ilu->bs; ++r)
+		  for (std::size_t c = 0; c < nrhs; ++c)
+		    yref(i, r, c) = tmp[r * nrhs + c];
+	      }
+	    }
+
+	    for (std::size_t i = 0; i < ilu->nrows; ++i)
+	      for (std::size_t b = 0; b < ilu->bs; ++b)
+		for (std::size_t c = 0; c < nrhs; ++c)
+		  yptr[row_off[i] + dense_off[b] + rhs_off[c]] = yref(i, b, c);
+
+	    yh.copyTo(y);
+	  },
+	  op.i,
+	  op.d,
+	  nullptr,
+	  op.order_t,
+	  op.imgLayout,
+	  op.domLayout,
+	  DenseOperator(),
+	  op.preferred_col_ordering,
+	  false};
+      }
+
+#  ifdef BUILD_SUPERLU_DIST
+      inline doublecomplex toSuperLUComplex(const ComplexD& v)
+      {
+	return doublecomplex{std::real(v), std::imag(v)};
+      }
+
+      inline ComplexD fromSuperLUComplex(const doublecomplex& v)
+      {
+	return ComplexD(v.r, v.i);
+      }
+
+      inline int checkedSuperLUCount(std::size_t n, const std::string& what)
+      {
+	if (n > (std::size_t)std::numeric_limits<int>::max())
+	  throw std::runtime_error("SuperLU_DIST: `" + what + "` exceeds MPI int count limits");
+	return (int)n;
+      }
+
+      inline std::vector<int> getDispls(const std::vector<int>& counts)
+      {
+	std::vector<int> displs(counts.size(), 0);
+	for (std::size_t i = 1; i < counts.size(); ++i)
+	  displs[i] = displs[i - 1] + counts[i - 1];
+	return displs;
+      }
+
+      template <typename T>
+      std::vector<T> alltoallvPod(const std::vector<T>& sendbuf, const std::vector<int>& sendcounts,
+				  std::vector<int>& recvcounts, const std::string& what)
+      {
+	recvcounts.assign(sendcounts.size(), 0);
+	if (!sendcounts.empty() && MPI_Alltoall(sendcounts.data(), 1, MPI_INT, recvcounts.data(), 1,
+						MPI_INT, MPI_COMM_WORLD) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: MPI_Alltoall failed while exchanging `" + what +
+				   "` counts");
+
+	std::vector<int> sendbytes(sendcounts.size(), 0), recvbytes(recvcounts.size(), 0);
+	for (std::size_t i = 0; i < sendcounts.size(); ++i)
+	{
+	  sendbytes[i] = checkedSuperLUCount((std::size_t)sendcounts[i] * sizeof(T), what);
+	  recvbytes[i] = checkedSuperLUCount((std::size_t)recvcounts[i] * sizeof(T), what);
+	}
+	std::vector<int> senddispls = getDispls(sendbytes);
+	std::vector<int> recvdispls = getDispls(recvbytes);
+	std::vector<T> recvbuf(
+	  (std::size_t)std::accumulate(recvcounts.begin(), recvcounts.end(), 0));
+
+	if (!sendcounts.empty() &&
+	    MPI_Alltoallv(sendbuf.empty() ? nullptr : (void*)sendbuf.data(), sendbytes.data(),
+			  senddispls.data(), MPI_BYTE,
+			  recvbuf.empty() ? nullptr : (void*)recvbuf.data(), recvbytes.data(),
+			  recvdispls.data(), MPI_BYTE, MPI_COMM_WORLD) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: MPI_Alltoallv failed while exchanging `" + what +
+				   "`");
+
+	return recvbuf;
+      }
+
+      struct SuperLURowPartition {
+	int rank = 0;
+	int world = 1;
+	int_t global_rows = 0;
+	std::vector<int_t> row_starts;
+	int_t fst_row = 0;
+	int_t m_loc = 0;
+
+	int ownerOf(int_t row) const
+	{
+	  auto it = std::upper_bound(row_starts.begin(), row_starts.end(), row);
+	  return (int)std::distance(row_starts.begin(), it) - 1;
+	}
+      };
+
+      inline SuperLURowPartition getSuperLURowPartition(int_t global_rows)
+      {
+	SuperLURowPartition out;
+	out.rank = Layout::nodeNumber();
+	out.world = Layout::numNodes();
+	out.global_rows = global_rows;
+	out.row_starts.resize((std::size_t)out.world + 1, 0);
+
+	int_t base = out.world == 0 ? 0 : global_rows / out.world;
+	int_t rem = out.world == 0 ? 0 : global_rows % out.world;
+	for (int p = 0; p < out.world; ++p)
+	  out.row_starts[(std::size_t)p + 1] =
+	    out.row_starts[(std::size_t)p] + base + (p < rem ? 1 : 0);
+	out.fst_row = out.row_starts[(std::size_t)out.rank];
+	out.m_loc = out.row_starts[(std::size_t)out.rank + 1] - out.fst_row;
+	return out;
+      }
+
+      struct SuperLUScalarTriplet {
+	int_t row = 0;
+	int_t col = 0;
+	doublecomplex val{0.0, 0.0};
+      };
+
+      template <std::size_t NOp>
+      struct SuperLUScalarRowRef {
+	std::size_t row_idx = 0;
+	std::size_t dense_idx = 0;
+	int peer = 0;
+	int_t global_row = 0;
+      };
+
+      template <std::size_t NOp>
+      struct SuperLUMatrixSetup {
+	int_t m = 0;
+	int_t n = 0;
+	int_t fst_row = 0;
+	int_t m_loc = 0;
+	int_t nnz_loc = 0;
+	std::vector<int_t> rowptr;
+	std::vector<int_t> colind;
+	std::vector<doublecomplex> nzval;
+	std::vector<SuperLUScalarRowRef<NOp>> send_rows;
+	std::vector<int_t> recv_local_rows;
+	std::vector<int> send_row_counts;
+	std::vector<int> send_row_displs;
+	std::vector<int> recv_row_counts;
+	std::vector<int> recv_row_displs;
+      };
+
+      template <std::size_t NOp>
+      int_t flattenSuperLUIndex(const Coor<NOp>& anchor, const Coor<NOp>& dense,
+				const Coor<NOp>& dims, const std::array<int_t, NOp>& strides,
+				const std::string& what)
+      {
+	int_t idx = 0;
+	for (unsigned int p = 0; p < NOp; ++p)
+	{
+	  int_t coor = (int_t)anchor[p] + (int_t)dense[p];
+	  if (coor < 0 || coor >= dims[p])
+	    throw std::runtime_error("SuperLU_DIST: " + what + " coordinate is out of bounds");
+	  idx += coor * strides[p];
+	}
+	return idx;
+      }
+
+      template <std::size_t NOp>
+      SuperLUMatrixSetup<NOp>
+      buildSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
+			      const std::string& prefix)
+      {
+	SuperLUMatrixSetup<NOp> setup;
+	const auto img_dims = kvcoors<NOp>(local_blocks.sp.i.order, local_blocks.sp.i.kvdim());
+	const auto dom_dims = kvcoors<NOp>(local_blocks.sp.d.order, local_blocks.sp.d.kvdim());
+	const auto img_strides =
+	  superbblas::detail::get_strides<int_t>(img_dims, superbblas::FastToSlow);
+	const auto dom_strides =
+	  superbblas::detail::get_strides<int_t>(dom_dims, superbblas::FastToSlow);
+	const int_t global_rows = (int_t)volume(local_blocks.sp.i.kvdim(), local_blocks.sp.i.order);
+	const int_t global_cols = (int_t)volume(local_blocks.sp.d.kvdim(), local_blocks.sp.d.order);
+	const auto partition = getSuperLURowPartition(global_rows);
+
+	setup.m = global_rows;
+	setup.n = global_cols;
+	setup.fst_row = partition.fst_row;
+	setup.m_loc = partition.m_loc;
+
+	std::vector<std::vector<SuperLUScalarRowRef<NOp>>> rows_by_peer(
+	  (std::size_t)partition.world);
+	std::vector<std::vector<SuperLUScalarTriplet>> triplets_by_peer(
+	  (std::size_t)partition.world);
+
+	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
+	  {
+	    int_t global_row = flattenSuperLUIndex(local_blocks.row_global_coors[row_idx],
+						   local_blocks.dense_img_coors[dense_idx],
+						   img_dims, img_strides, "row");
+	    int owner = partition.ownerOf(global_row);
+	    rows_by_peer[(std::size_t)owner].push_back(
+	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, owner, global_row});
+	  }
+
+	for (auto& rows : rows_by_peer)
+	  std::sort(rows.begin(), rows.end(),
+		    [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
+		      return a.global_row < b.global_row;
+		    });
+
+	setup.send_row_counts.resize((std::size_t)partition.world, 0);
+	for (int peer = 0; peer < partition.world; ++peer)
+	{
+	  setup.send_row_counts[(std::size_t)peer] =
+	    checkedSuperLUCount(rows_by_peer[(std::size_t)peer].size(), "row redistribution");
+	  setup.send_rows.insert(setup.send_rows.end(), rows_by_peer[(std::size_t)peer].begin(),
+				 rows_by_peer[(std::size_t)peer].end());
+	}
+	setup.send_row_displs = getDispls(setup.send_row_counts);
+
+	std::vector<int_t> send_row_ids(setup.send_rows.size(), 0);
+	for (std::size_t i = 0; i < setup.send_rows.size(); ++i)
+	  send_row_ids[i] = setup.send_rows[i].global_row;
+	auto recv_row_ids =
+	  alltoallvPod(send_row_ids, setup.send_row_counts, setup.recv_row_counts, "row ids");
+	setup.recv_row_displs = getDispls(setup.recv_row_counts);
+	setup.recv_local_rows.resize(recv_row_ids.size(), 0);
+	for (std::size_t i = 0; i < recv_row_ids.size(); ++i)
+	{
+	  int_t row = recv_row_ids[i];
+	  if (row < partition.fst_row || row >= partition.fst_row + partition.m_loc)
+	    throw std::runtime_error("SuperLU_DIST: received a row outside the local slab");
+	  setup.recv_local_rows[i] = row - partition.fst_row;
+	}
+
+	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	  for (std::size_t dense_r = 0; dense_r < local_blocks.bs; ++dense_r)
+	  {
+	    int_t global_row = flattenSuperLUIndex(local_blocks.row_global_coors[row_idx],
+						   local_blocks.dense_img_coors[dense_r], img_dims,
+						   img_strides, "row");
+	    int owner = partition.ownerOf(global_row);
+	    auto& send = triplets_by_peer[(std::size_t)owner];
+
+	    for (const auto& block_entry : local_blocks.rows[row_idx])
+	      for (std::size_t dense_c = 0; dense_c < local_blocks.bs; ++dense_c)
+	      {
+		const ComplexD value = block_entry.data[dense_r * local_blocks.bs + dense_c];
+		if (value == ComplexD{})
+		  continue;
+
+		int_t global_col =
+		  flattenSuperLUIndex(block_entry.dom_coor, local_blocks.dense_dom_coors[dense_c],
+				      dom_dims, dom_strides, "column");
+		send.push_back({global_row, global_col, toSuperLUComplex(value)});
+	      }
+	  }
+
+	std::vector<int> send_triplet_counts((std::size_t)partition.world, 0), recv_triplet_counts;
+	std::vector<SuperLUScalarTriplet> send_triplets;
+	for (int peer = 0; peer < partition.world; ++peer)
+	{
+	  auto& peer_triplets = triplets_by_peer[(std::size_t)peer];
+	  std::sort(peer_triplets.begin(), peer_triplets.end(),
+		    [](const SuperLUScalarTriplet& a, const SuperLUScalarTriplet& b) {
+		      return a.row < b.row || (a.row == b.row && a.col < b.col);
+		    });
+	  send_triplet_counts[(std::size_t)peer] =
+	    checkedSuperLUCount(peer_triplets.size(), "matrix triplets");
+	  send_triplets.insert(send_triplets.end(), peer_triplets.begin(), peer_triplets.end());
+	}
+
+	auto recv_triplets =
+	  alltoallvPod(send_triplets, send_triplet_counts, recv_triplet_counts, "matrix triplets");
+	std::sort(recv_triplets.begin(), recv_triplets.end(),
+		  [](const SuperLUScalarTriplet& a, const SuperLUScalarTriplet& b) {
+		    return a.row < b.row || (a.row == b.row && a.col < b.col);
+		  });
+
+	setup.rowptr.assign((std::size_t)setup.m_loc + 1, 0);
+	setup.colind.clear();
+	setup.nzval.clear();
+	int_t local_row = 0;
+	for (std::size_t i = 0; i < recv_triplets.size(); ++i)
+	{
+	  const auto& entry = recv_triplets[i];
+	  if (entry.row < setup.fst_row || entry.row >= setup.fst_row + setup.m_loc)
+	    throw std::runtime_error(
+	      "SuperLU_DIST: received a matrix entry outside the local slab");
+	  int_t row = entry.row - setup.fst_row;
+	  while (local_row < row)
+	  {
+	    setup.rowptr[(std::size_t)local_row + 1] = (int_t)setup.colind.size();
+	    ++local_row;
+	  }
+
+	  if (!setup.colind.empty() && local_row == row && setup.colind.back() == entry.col)
+	  {
+	    setup.nzval.back().r += entry.val.r;
+	    setup.nzval.back().i += entry.val.i;
+	  }
+	  else
+	  {
+	    setup.colind.push_back(entry.col);
+	    setup.nzval.push_back(entry.val);
+	  }
+	}
+	while (local_row < setup.m_loc)
+	{
+	  setup.rowptr[(std::size_t)local_row + 1] = (int_t)setup.colind.size();
+	  ++local_row;
+	}
+	setup.nnz_loc = (int_t)setup.colind.size();
+
+	detail::log(1, prefix +
+			 " SuperLU local slab rows=" + std::to_string((long long)setup.m_loc) +
+			 " nnz=" + std::to_string((long long)setup.nnz_loc));
+	return setup;
+      }
+#  endif
+
+      template <std::size_t NOp>
+      Operator<NOp, ComplexD> getSuperLUSolver(Operator<NOp, ComplexD> op, const Options& ops,
+					       Operator<NOp, ComplexD> prec_)
+      {
+#  ifndef BUILD_SUPERLU_DIST
+	(void)op;
+	(void)ops;
+	(void)prec_;
+	throw std::runtime_error(
+	  "getSuperLUSolver: requested `type=superlu`, but Chroma was built without "
+	  "SuperLU_DIST support");
+#  else
+	if (prec_)
+	  throw std::runtime_error("getSuperLUSolver: unsupported input preconditioner");
+	if (!op.d.is_compatible(op.i))
+	  throw std::runtime_error("getSuperLUSolver: only square operators are supported");
+	if (!op.order_t.empty())
+	  throw std::runtime_error("getSuperLUSolver: tensor-transposed operators are unsupported");
+
+	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	Tracker _t(std::string("setup SuperLU_DIST solver ") + prefix);
+
+	int nprow = getOption<int>(ops, "nprow");
+	int npcol = getOption<int>(ops, "npcol");
+	int npdep = getOption<int>(ops, "npdep");
+	if (nprow <= 0 || npcol <= 0 || npdep <= 0)
+	  throw std::runtime_error("getSuperLUSolver: grid dimensions must be positive");
+	if (nprow * npcol * npdep != Layout::numNodes())
+	  throw std::runtime_error(
+	    "getSuperLUSolver: v1 requires nprow*npcol*npdep == Layout::numNodes()");
+
+	SpTensor<NOp, NOp, ComplexD> sp;
+	remap rd;
+	if (op.sp)
+	{
+	  auto sp0 = op.sp;
+	  if (!sp0.is_kronecker())
+	  {
+	    sp = sp0;
+	    rd = op.rd;
+	  }
+	}
+	if (!sp)
+	{
+	  unsigned int power =
+	    getOption<unsigned int>(ops, "power", getFurthestNeighborDistance(op));
+	  auto explicit_op =
+	    cloneOperatorToSpTensor(op, power, RowMajor, false, std::string("SuperLU ") + prefix);
+	  sp = explicit_op.first;
+	  rd = explicit_op.second;
+	}
+	if (!sp)
+	  throw std::runtime_error("getSuperLUSolver: failed to build an explicit sparse operator");
+	if (sp.is_kronecker())
+	  throw std::runtime_error("getSuperLUSolver: Kronecker sparse format is unsupported");
+	if (rd.empty())
+	  for (unsigned int p = 0; p < NOp; ++p)
+	    rd[sp.i.order[p]] = sp.d.order[p];
+
+	auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST");
+	auto setup =
+	  std::make_shared<SuperLUMatrixSetup<NOp>>(buildSuperLUMatrixSetup(local_blocks, prefix));
+
+	// Keep the explicit sparse conversion and the redistribution schedules in shared setup
+	// objects. Each solve call only packs the current RHS batch, calls SuperLU once, and
+	// scatters the solution back to the Chroma tensor layout.
+	return Operator<NOp, ComplexD>{
+	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
+	    const std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
+	    const std::size_t nrhs = x.volume(order_cols);
+	    if (nrhs == 0)
+	      return;
+
+	    auto xh = x.make_sure(local_blocks.sp.i.order + order_cols, OnHost);
+	    auto yh = y.make_compatible(local_blocks.sp.i.order + order_cols, {}, OnHost);
+	    yh.set_zero();
+	    auto x_local = xh.getLocal();
+	    auto y_local = yh.getLocal();
+
+	    const ComplexD* xptr = x_local.data();
+	    ComplexD* yptr = y_local.data();
+	    const auto full_strides =
+	      superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
+
+	    std::vector<std::size_t> rhs_off(nrhs, 0);
+	    if (!order_cols.empty())
+	    {
+	      std::vector<int> rhs_sizes;
+	      rhs_sizes.reserve(order_cols.size());
+	      for (char c : order_cols)
+		rhs_sizes.push_back(x_local.kvdim().at(c));
+	      for (std::size_t c = 0; c < nrhs; ++c)
+	      {
+		std::size_t off = 0;
+		std::size_t tcol = c;
+		for (std::size_t k = 0; k < order_cols.size(); ++k)
+		{
+		  int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
+		  tcol /= (std::size_t)rhs_sizes[k];
+		  unsigned int p = (unsigned int)x_local.order.find(order_cols[k]);
+		  off += (std::size_t)v * full_strides[p];
+		}
+		rhs_off[c] = off;
+	      }
+	    }
+
+	    std::vector<std::size_t> dense_off(local_blocks.bs, 0);
+	    for (std::size_t b = 0; b < local_blocks.bs; ++b)
+	      for (unsigned int p = 0; p < NOp; ++p)
+		dense_off[b] += (std::size_t)local_blocks.dense_img_coors[b][p] * full_strides[p];
+
+	    std::vector<std::size_t> row_off(local_blocks.nrows, 0);
+	    for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	      for (unsigned int p = 0; p < NOp; ++p)
+		row_off[row_idx] +=
+		  (std::size_t)local_blocks.row_local_coors[row_idx][p] * full_strides[p];
+
+	    // SuperLU expects each rank to own a contiguous global row slab, so the RHS must be
+	    // redistributed from Chroma's native layout before the solve and sent back afterwards.
+	    std::vector<doublecomplex> send_rhs(setup->send_rows.size() * nrhs,
+						doublecomplex{0, 0});
+	    for (std::size_t i = 0; i < setup->send_rows.size(); ++i)
+	    {
+	      const auto& row = setup->send_rows[i];
+	      std::size_t base = row_off[row.row_idx] + dense_off[row.dense_idx];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(xptr[base + rhs_off[rhs]]));
+	    }
+
+	    auto scale_counts = [&](const std::vector<int>& counts, const std::string& what) {
+	      std::vector<int> out(counts.size(), 0);
+	      for (std::size_t i = 0; i < counts.size(); ++i)
+		out[i] = checkedSuperLUCount((std::size_t)counts[i] * nrhs, what);
+	      return out;
+	    };
+
+	    std::vector<int> recv_rhs_counts;
+	    auto recv_rhs =
+	      alltoallvPod(send_rhs, scale_counts(setup->send_row_counts, "rhs values"),
+			   recv_rhs_counts, "rhs values");
+	    (void)recv_rhs_counts;
+
+	    int_t ldb = std::max<int_t>((int_t)1, setup->m_loc);
+	    std::vector<doublecomplex> b((std::size_t)ldb * nrhs, doublecomplex{0.0, 0.0});
+	    for (std::size_t i = 0; i < setup->recv_local_rows.size(); ++i)
+	    {
+	      int_t local_row = setup->recv_local_rows[i];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		b[(std::size_t)local_row + rhs * (std::size_t)ldb] = recv_rhs[i * nrhs + rhs];
+	    }
+
+	    superlu_dist_options_t options;
+	    set_default_options_dist(&options);
+	    options.IterRefine = NOREFINE;
+
+	    struct SolveScope {
+	      std::string prefix;
+	      superlu_dist_options_t* options = nullptr;
+	      SuperMatrix A{};
+	      gridinfo3d_t grid{};
+	      zScalePermstruct_t ScalePermstruct{};
+	      zLUstruct_t LUstruct{};
+	      zSOLVEstruct_t SOLVEstruct{};
+	      SuperLUStat_t stat{};
+	      int_t n = 0;
+	      bool grid_init = false;
+	      bool matrix_init = false;
+	      bool scaleperm_init = false;
+	      bool lu_init = false;
+	      bool stat_init = false;
+	      bool solve_init = false;
+
+	      ~SolveScope()
+	      {
+		if (stat_init)
+		  PStatFree(&stat);
+		if (matrix_init)
+		  Destroy_CompRowLoc_Matrix_dist(&A);
+		if (scaleperm_init)
+		  zScalePermstructFree(&ScalePermstruct);
+		if (lu_init)
+		{
+		  zDestroy_LU(n, &grid.grid2d, &LUstruct);
+		  zLUstructFree(&LUstruct);
+		}
+		if (solve_init)
+		  zSolveFinalize(options, &SOLVEstruct);
+		if (grid_init)
+		{
+		  // Keep grid teardown at the top solve scope so this runs exactly once per
+		  // SuperLU solve invocation, never once per RHS.
+		  detail::log(1, prefix + " calling superlu_gridexit3d");
+		  superlu_gridexit3d(&grid);
+		}
+	      }
+	    } scope;
+	    scope.prefix = prefix;
+	    scope.options = &options;
+	    scope.n = setup->n;
+
+	    superlu_gridinit3d(MPI_COMM_WORLD, nprow, npcol, npdep, &scope.grid);
+	    scope.grid_init = true;
+
+	    int_t* rowptr = intMalloc_dist(setup->m_loc + 1);
+	    int_t* colind = setup->nnz_loc == 0 ? nullptr : intMalloc_dist(setup->nnz_loc);
+	    doublecomplex* nzval =
+	      setup->nnz_loc == 0 ? nullptr : doublecomplexMalloc_dist(setup->nnz_loc);
+	    std::copy(setup->rowptr.begin(), setup->rowptr.end(), rowptr);
+	    if (setup->nnz_loc > 0)
+	    {
+	      std::copy(setup->colind.begin(), setup->colind.end(), colind);
+	      std::copy(setup->nzval.begin(), setup->nzval.end(), nzval);
+	    }
+
+	    zCreate_CompRowLoc_Matrix_dist(&scope.A, setup->m, setup->n, setup->nnz_loc,
+					   setup->m_loc, setup->fst_row, nzval, colind, rowptr,
+					   SLU_NR_loc, SLU_Z, SLU_GE);
+	    scope.matrix_init = true;
+
+	    zScalePermstructInit(setup->m, setup->n, &scope.ScalePermstruct);
+	    scope.scaleperm_init = true;
+	    zLUstructInit(setup->n, &scope.LUstruct);
+	    scope.lu_init = true;
+	    PStatInit(&scope.stat);
+	    scope.stat_init = true;
+
+	    std::vector<double> berr(std::max<std::size_t>(nrhs, 1), 0.0);
+	    int info = 0;
+	    pzgssvx3d(&options, &scope.A, &scope.ScalePermstruct, b.data(), ldb,
+		      checkedSuperLUCount(nrhs, "nrhs"), &scope.grid, &scope.LUstruct,
+		      &scope.SOLVEstruct, berr.data(), &scope.stat, &info);
+	    scope.solve_init = true;
+	    if (info != 0)
+	      throw std::runtime_error("SuperLU_DIST: pzgssvx3d failed with info=" +
+				       std::to_string(info));
+
+	    std::vector<doublecomplex> send_sol;
+	    send_sol.reserve(setup->recv_local_rows.size() * nrhs);
+	    for (std::size_t i = 0; i < setup->recv_local_rows.size(); ++i)
+	    {
+	      int_t local_row = setup->recv_local_rows[i];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		send_sol.push_back(b[(std::size_t)local_row + rhs * (std::size_t)ldb]);
+	    }
+
+	    std::vector<int> recv_sol_counts;
+	    auto recv_sol =
+	      alltoallvPod(send_sol, scale_counts(setup->recv_row_counts, "solution values"),
+			   recv_sol_counts, "solution values");
+	    (void)recv_sol_counts;
+
+	    for (std::size_t i = 0; i < setup->send_rows.size(); ++i)
+	    {
+	      const auto& row = setup->send_rows[i];
+	      std::size_t base = row_off[row.row_idx] + dense_off[row.dense_idx];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		yptr[base + rhs_off[rhs]] = fromSuperLUComplex(recv_sol[i * nrhs + rhs]);
+	    }
+
+	    yh.copyTo(y);
+	  },
+	  op.i,
+	  op.d,
+	  nullptr,
+	  op.order_t,
+	  op.imgLayout,
+	  op.domLayout,
+	  DenseOperator(),
+	  op.preferred_col_ordering,
+	  false};
+#  endif
+      }
+
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getSuperLUSolver(Operator<NOp, COMPLEX>, const Options&,
+					      Operator<NOp, COMPLEX>)
+      {
+	throw std::runtime_error("getSuperLUSolver: only ComplexD is supported");
+      }
+
       /// Returns a blocking, which should enhanced the performance of the sparse-dense tensor contraction.
       ///
       /// \param op: operator to make the inverse of
@@ -3433,8 +4907,10 @@ namespace Chroma
 
 	// Primme solver setup
 	primme.numEvals = numEvals;
-	primme.printLevel =
-	  (verb == NoOutput ? 0 : verb == JustSummary ? 1 : verb == Detailed ? 3 : 5);
+	primme.printLevel = (verb == NoOutput	   ? 0
+			     : verb == JustSummary ? 1
+			     : verb == Detailed	   ? 3
+						   : 5);
 	primme.n = op_double.d.volume();
 	primme.eps = tol;
 	primme.target = primme_largest_abs;
@@ -3609,31 +5085,31 @@ namespace Chroma
 	{
 	  int ns = op.d.kvdim().at('s');
 	  auto g5 = getGamma5<COMPLEX>(ns, op.d.getDev(), op.d.dist);
-	  shifted_op = {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
-			  // y = op * x
-			  op(x, y);
+	  shifted_op = {
+	    [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+	      // y = op * x
+	      op(x, y);
 
-			  // y +=  x * shift_I
-			  if (shift_I != 0)
-			    x.scale(shift_I).addTo(y);
+	      // y +=  x * shift_I
+	      if (shift_I != 0)
+		x.scale(shift_I).addTo(y);
 
-			  // y += shift_ig5 * i * g5
-			  if (shift_ig5 != 0)
-			  {
-			    COMPLEX ishift =
-			      static_cast<COMPLEX>(std::complex<double>{0.0, shift_ig5});
-			    if (ns == 1)
-			    {
-			      x.scale(ishift).addTo(y);
-			    }
-			    else
-			    {
-			      contract<NOp + 1>(g5.rename_dims({{'j', 's'}}).scale(ishift), x, "s",
-						AddTo, y, {{'s', 'i'}});
-			    }
-			  }
-			},
-			op.d, op.i, nullptr, op};
+	      // y += shift_ig5 * i * g5
+	      if (shift_ig5 != 0)
+	      {
+		COMPLEX ishift = static_cast<COMPLEX>(std::complex<double>{0.0, shift_ig5});
+		if (ns == 1)
+		{
+		  x.scale(ishift).addTo(y);
+		}
+		else
+		{
+		  contract<NOp + 1>(g5.rename_dims({{'j', 's'}}).scale(ishift), x, "s", AddTo, y,
+				    {{'s', 'i'}});
+		}
+	      }
+	    },
+	    op.d, op.i, nullptr, op};
 	}
 
 	// Get the solver
@@ -3766,11 +5242,23 @@ namespace Chroma
       {
 	// Store operator in file
 	std::string save_op_in_file = getOption<std::string>(ops, "save_in_file", "");
-	if (save_op_in_file.size() > 0)
+	if (!save_op_in_file.empty())
 	{
 	  if (!op.sp)
 	    ops.throw_error("getPrint: cannot store an implicit operator");
-	  op.sp.store(save_op_in_file);
+	  if (!op.sp.is_kronecker())
+	  {
+	    op.sp.store(save_op_in_file);
+	  }
+	  else
+	  {
+	    QDPIO::cout << "BEGIN_KRON_MATRIX_DUMP " << save_op_in_file << std::endl;
+	    QDPIO::cout << "% save_in_file=" << save_op_in_file << std::endl;
+	    QDPIO::cout.flush();
+	    op.sp.print("A");
+	    QDPIO::cout << "END_KRON_MATRIX_DUMP " << save_op_in_file << std::endl;
+	    QDPIO::cout.flush();
+	  }
 	}
 
 	// Get the solver options
@@ -3796,7 +5284,10 @@ namespace Chroma
 	EO,
 	HIE,
 	DD,
-	BJ,
+	BJ,  // Hanzhao
+	JC,  // Hanzhao
+	ILU, // Hanzhao
+	SUPERLU,
 	SHIFT,
 	PROJ,
 	SPINEO,
@@ -3807,23 +5298,28 @@ namespace Chroma
 	CASTING,
 	PRINT
       };
-      static const std::map<std::string, SolverType> solverTypeMap{{"fgmres", FGMRES},
-								   {"bicgstab", BICGSTAB},
-								   {"mr", MR},
-								   {"gcr", GCR},
-								   {"mg", MG},
-								   {"eo", EO},
-								   {"hie", HIE},
-								   {"dd", DD},
-								   {"bj", BJ},
-								   {"shift", SHIFT},
-								   {"proj", PROJ},
-								   {"spineo", SPINEO},
-								   {"igd", IGD},
-								   {"g5", G5},
-								   {"blocking", BLOCKING},
-								   {"casting", CASTING},
-								   {"print", PRINT}};
+      static const std::map<std::string, SolverType> solverTypeMap{
+	{"fgmres", FGMRES},
+	{"bicgstab", BICGSTAB},
+	{"mr", MR},
+	{"gcr", GCR},
+	{"superlu", SUPERLU},
+	{"mg", MG},
+	{"eo", EO},
+	{"hie", HIE},
+	{"dd", DD},
+	{"bj", BJ}, // A M M^{-1} y = x; BJ = M^{-1}; size(BJ) = size(A) = (n, n); size(y) = (n, 1)
+	{"jc", JC},
+	{"ilu", ILU}, // ilu-color
+
+	{"shift", SHIFT},
+	{"proj", PROJ},
+	{"spineo", SPINEO},
+	{"igd", IGD},
+	{"g5", G5},
+	{"blocking", BLOCKING},
+	{"casting", CASTING},
+	{"print", PRINT}};
       SolverType solverType = getOption<SolverType>(ops, "type", solverTypeMap);
       switch (solverType)
       {
@@ -3845,6 +5341,12 @@ namespace Chroma
 	return detail::getDomainDecompositionPrec(op, ops, prec);
       case BJ: // block Jacobi
 	return detail::getBlockJacobi(op, ops, prec);
+      case JC: // Jacobi
+	return detail::getJacobiSolver(op, ops, prec);
+      case ILU: // local 2-color block ILU(0)
+	return detail::getILU0(op, ops, prec);
+      case SUPERLU: // direct sparse solve through SuperLU_DIST
+	return detail::getSuperLUSolver(op, ops, prec);
       case SHIFT: // shift operator
 	return detail::getShiftedOp(op, ops, prec);
       case PROJ: // projector preconditioner
@@ -3942,12 +5444,10 @@ namespace Chroma
 
 	// Clone the matvec
 	LinearOperator<LatticeFermion>* fLinOp = S->genLinOp(state);
-	if (!fLinOp)
-	  throw std::runtime_error("Unsupported action by mgproton");
 	ColOrdering co = getOption<ColOrdering>(*ops, "InvertParam/operator_ordering",
-						getColOrderingMap(), RowMajor);
+						getColOrderingMap(), ColumnMajor);
 	ColOrdering co_blk = getOption<ColOrdering>(*ops, "InvertParam/operator_block_ordering",
-						    getColOrderingMap(), ColumnMajor);
+						    getColOrderingMap(), RowMajor);
 	Operator<Nd + 7, Complex> linOp = detail::cloneOperator(
 	  asOperatorView(*fLinOp), co, co_blk, detail::ConsiderBlockingSparse, "chroma's operator");
 
@@ -4609,12 +6109,10 @@ namespace Chroma
 
 	// Clone the matvec
 	LinearOperator<LatticeFermion>* fLinOp = S->genLinOp(state);
-	if (!fLinOp)
-	  throw std::runtime_error("Unsupported action by mgproton");
 	ColOrdering co = getOption<ColOrdering>(*ops, "Projector/operator_ordering",
-						getColOrderingMap(), RowMajor);
+						getColOrderingMap(), ColumnMajor);
 	ColOrdering co_blk = getOption<ColOrdering>(*ops, "Projector/operator_block_ordering",
-						    getColOrderingMap(), ColumnMajor);
+						    getColOrderingMap(), RowMajor);
 	Operator<Nd + 7, Complex> linOp = detail::cloneOperator(
 	  asOperatorView(*fLinOp), co, co_blk, detail::ConsiderBlockingSparse, "chroma's operator");
 

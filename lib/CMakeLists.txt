@@ -2067,6 +2067,20 @@ if( Chroma_ENABLE_SUPERBBLAS )
   target_link_libraries(superbblas INTERFACE BLAS::BLAS ${Chroma_extra_link_flags})
 endif()
 
+if( Chroma_ENABLE_SUPERLU_DIST )
+  find_package(PkgConfig REQUIRED)
+  if( SUPERLU_DIST_ROOT )
+    set(_old_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+    if( _old_pkg_config_path )
+      set(ENV{PKG_CONFIG_PATH} "${SUPERLU_DIST_ROOT}/lib/pkgconfig:${_old_pkg_config_path}")
+    else()
+      set(ENV{PKG_CONFIG_PATH} "${SUPERLU_DIST_ROOT}/lib/pkgconfig")
+    endif()
+  endif()
+  pkg_check_modules(SUPERLU_DIST REQUIRED IMPORTED_TARGET superlu_dist)
+  target_link_libraries(chromalib PUBLIC PkgConfig::SUPERLU_DIST)
+endif()
+
 
 if( Chroma_SANITIZER_OPTS )
    target_compile_options(chromalib PRIVATE ${Chroma_SANITIZER_OPTS})
@@ -2107,4 +2121,3 @@ install(TARGETS chromalib EXPORT ChromaTargets
 
       
 add_library(Chroma::chromalib ALIAS chromalib)
-

@@ -87,6 +87,11 @@ AM_LDFLAGS += @SB_LDFLAGS@
 LDADD	+= @SB_LIBS@
 endif
 
+if BUILD_SUPERLU_DIST
+AM_LDFLAGS += @SUPERLU_DIST_LDFLAGS@
+LDADD	+= @SUPERLU_DIST_LIBS@
+endif
+
 if BUILD_PRIMME
 AM_CXXFLAGS += @PRIMME_CXXFLAGS@
 AM_LDFLAGS += @PRIMME_LDFLAGS@
@@ -304,4 +309,3 @@ build_chroma_libs:
 .PHONY: rebuild_other_libs
 rebuild_other_libs:
 	cd $(BUILDDIR)/other_libs ; $(MAKE)
-

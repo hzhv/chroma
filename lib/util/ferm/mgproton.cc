@@ -11,7 +11,7 @@
 #include "util/ferm/superb_options.h"
 
 #ifdef BUILD_SUPERLU_DIST
-#include "util/ferm/chroma_superlu_dist_wrapper.h"
+#  include "util/ferm/chroma_superlu_dist_wrapper.h"
 #endif
 
 #include <array>
@@ -3492,16 +3492,16 @@ namespace Chroma
 	std::string col_labels;
 	std::size_t nrows = 0;
 	std::size_t bs = 0;
-		std::array<unsigned int, NOp> img_to_dom_pos{};
-		std::vector<Coor<NOp>> row_local_coors;
-		std::vector<Coor<NOp>> row_global_coors;
-		std::size_t dom_nrows = 0;
-		std::vector<Coor<NOp>> dom_row_local_coors;
-		std::vector<Coor<NOp>> dom_row_global_coors;
-		std::vector<Coor<NOp>> dense_img_coors;
-		std::vector<Coor<NOp>> dense_dom_coors;
-		std::vector<std::vector<RowBlock>> rows;
-	      };
+	std::array<unsigned int, NOp> img_to_dom_pos{};
+	std::vector<Coor<NOp>> row_local_coors;
+	std::vector<Coor<NOp>> row_global_coors;
+	std::size_t dom_nrows = 0;
+	std::vector<Coor<NOp>> dom_row_local_coors;
+	std::vector<Coor<NOp>> dom_row_global_coors;
+	std::vector<Coor<NOp>> dense_img_coors;
+	std::vector<Coor<NOp>> dense_dom_coors;
+	std::vector<std::vector<RowBlock>> rows;
+      };
 
       template <std::size_t NOp, typename COMPLEX>
       ExplicitLocalBlockRows<NOp, COMPLEX>
@@ -3556,39 +3556,37 @@ namespace Chroma
 	out.nrows = ii_host.volume();
 	out.row_local_coors.resize(out.nrows);
 	out.row_global_coors.resize(out.nrows);
-		out.dense_img_coors.resize(out.bs);
-		out.dense_dom_coors.resize(out.bs);
-		out.rows.resize(out.nrows);
+	out.dense_img_coors.resize(out.bs);
+	out.dense_dom_coors.resize(out.bs);
+	out.rows.resize(out.nrows);
 
-		const auto dom_local_from = sp.d.p->localFrom();
-		auto dom_anchor_size = sp.d.p->localSize();
-		for (char c : out.col_labels)
-		{
-		  unsigned int pos = (unsigned int)sp.d.order.find(c);
-		  if (pos >= NOp || dom_local_from[pos] != 0 ||
-		      dom_anchor_size[pos] != sp.d.kvdim().at(c))
-		    throw std::runtime_error(solver_name +
-					     ": unsupported domain partition splitting dense block "
-					     "dimension `" +
-					     std::string(1, c) + "`");
-		  dom_anchor_size[pos] = 1;
-		}
-		const auto dom_anchor_strides =
-		  superbblas::detail::get_strides<Index>(dom_anchor_size, superbblas::FastToSlow);
-		out.dom_nrows = superbblas::detail::volume(dom_anchor_size);
-		out.dom_row_local_coors.resize(out.dom_nrows);
-		out.dom_row_global_coors.resize(out.dom_nrows);
-		for (std::size_t row_idx = 0; row_idx < out.dom_nrows; ++row_idx)
-		{
-		  using superbblas::detail::operator+;
-		  const auto row_local_coor =
-		    superbblas::detail::index2coor((Index)row_idx, dom_anchor_size,
-						   dom_anchor_strides);
-		  out.dom_row_local_coors[row_idx] = row_local_coor;
-		  out.dom_row_global_coors[row_idx] = row_local_coor + dom_local_from;
-		}
+	const auto dom_local_from = sp.d.p->localFrom();
+	auto dom_anchor_size = sp.d.p->localSize();
+	for (char c : out.col_labels)
+	{
+	  unsigned int pos = (unsigned int)sp.d.order.find(c);
+	  if (pos >= NOp || dom_local_from[pos] != 0 || dom_anchor_size[pos] != sp.d.kvdim().at(c))
+	    throw std::runtime_error(solver_name +
+				     ": unsupported domain partition splitting dense block "
+				     "dimension `" +
+				     std::string(1, c) + "`");
+	  dom_anchor_size[pos] = 1;
+	}
+	const auto dom_anchor_strides =
+	  superbblas::detail::get_strides<Index>(dom_anchor_size, superbblas::FastToSlow);
+	out.dom_nrows = superbblas::detail::volume(dom_anchor_size);
+	out.dom_row_local_coors.resize(out.dom_nrows);
+	out.dom_row_global_coors.resize(out.dom_nrows);
+	for (std::size_t row_idx = 0; row_idx < out.dom_nrows; ++row_idx)
+	{
+	  using superbblas::detail::operator+;
+	  const auto row_local_coor =
+	    superbblas::detail::index2coor((Index)row_idx, dom_anchor_size, dom_anchor_strides);
+	  out.dom_row_local_coors[row_idx] = row_local_coor;
+	  out.dom_row_global_coors[row_idx] = row_local_coor + dom_local_from;
+	}
 
-		for (std::size_t b = 0; b < out.bs; ++b)
+	for (std::size_t b = 0; b < out.bs; ++b)
 	{
 	  Coor<NOp> img_block_coor{{}};
 	  Coor<NOp> dom_block_coor{{}};
@@ -4259,23 +4257,23 @@ namespace Chroma
 	return displs;
       }
 
-	      template <typename T>
-	      std::vector<T> alltoallvPod(const std::vector<T>& sendbuf, const std::vector<int>& sendcounts,
-					  std::vector<int>& recvcounts, const std::string& what,
-					  MPI_Comm comm)
-	      {
-		recvcounts.assign(sendcounts.size(), 0);
-		int comm_size = 0;
-		if (MPI_Comm_size(comm, &comm_size) != MPI_SUCCESS)
-		  throw std::runtime_error("SuperLU_DIST: MPI_Comm_size failed while exchanging `" +
-					   what + "`");
-		if ((int)sendcounts.size() != comm_size)
-		  throw std::runtime_error("SuperLU_DIST: `" + what +
-					   "` send count size does not match communicator size");
-		if (!sendcounts.empty() && MPI_Alltoall(sendcounts.data(), 1, MPI_INT, recvcounts.data(), 1,
-							MPI_INT, comm) != MPI_SUCCESS)
-		  throw std::runtime_error("SuperLU_DIST: MPI_Alltoall failed while exchanging `" + what +
-					   "` counts");
+      template <typename T>
+      std::vector<T> alltoallvPod(const std::vector<T>& sendbuf, const std::vector<int>& sendcounts,
+				  std::vector<int>& recvcounts, const std::string& what,
+				  MPI_Comm comm)
+      {
+	recvcounts.assign(sendcounts.size(), 0);
+	int comm_size = 0;
+	if (MPI_Comm_size(comm, &comm_size) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: MPI_Comm_size failed while exchanging `" + what +
+				   "`");
+	if ((int)sendcounts.size() != comm_size)
+	  throw std::runtime_error("SuperLU_DIST: `" + what +
+				   "` send count size does not match communicator size");
+	if (!sendcounts.empty() && MPI_Alltoall(sendcounts.data(), 1, MPI_INT, recvcounts.data(), 1,
+						MPI_INT, comm) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: MPI_Alltoall failed while exchanging `" + what +
+				   "` counts");
 
 	std::vector<int> sendbytes(sendcounts.size(), 0), recvbytes(recvcounts.size(), 0);
 	for (std::size_t i = 0; i < sendcounts.size(); ++i)
@@ -4289,12 +4287,12 @@ namespace Chroma
 	  (std::size_t)std::accumulate(recvcounts.begin(), recvcounts.end(), 0));
 
 	if (!sendcounts.empty() &&
-		    MPI_Alltoallv(sendbuf.empty() ? nullptr : (void*)sendbuf.data(), sendbytes.data(),
-				  senddispls.data(), MPI_BYTE,
-				  recvbuf.empty() ? nullptr : (void*)recvbuf.data(), recvbytes.data(),
-				  recvdispls.data(), MPI_BYTE, comm) != MPI_SUCCESS)
-		  throw std::runtime_error("SuperLU_DIST: MPI_Alltoallv failed while exchanging `" + what +
-					   "`");
+	    MPI_Alltoallv(sendbuf.empty() ? nullptr : (void*)sendbuf.data(), sendbytes.data(),
+			  senddispls.data(), MPI_BYTE,
+			  recvbuf.empty() ? nullptr : (void*)recvbuf.data(), recvbytes.data(),
+			  recvdispls.data(), MPI_BYTE, comm) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: MPI_Alltoallv failed while exchanging `" + what +
+				   "`");
 
 	return recvbuf;
       }
@@ -4358,17 +4356,17 @@ namespace Chroma
 	std::vector<doublecomplex> nzval;
 	std::vector<SuperLUScalarRowRef<NOp>> send_rows;
 	std::vector<int_t> recv_local_rows;
-		std::vector<int> send_row_counts;
-		std::vector<int> send_row_displs;
-		std::vector<int> recv_row_counts;
-		std::vector<int> recv_row_displs;
-		std::vector<SuperLUScalarRowRef<NOp>> send_sol_rows;
-		std::vector<int_t> recv_sol_local_rows;
-		std::vector<int> send_sol_counts;
-		std::vector<int> send_sol_displs;
-		std::vector<int> recv_sol_counts;
-		std::vector<int> recv_sol_displs;
-	      };
+	std::vector<int> send_row_counts;
+	std::vector<int> send_row_displs;
+	std::vector<int> recv_row_counts;
+	std::vector<int> recv_row_displs;
+	std::vector<SuperLUScalarRowRef<NOp>> send_sol_rows;
+	std::vector<int_t> recv_sol_local_rows;
+	std::vector<int> send_sol_counts;
+	std::vector<int> send_sol_displs;
+	std::vector<int> recv_sol_counts;
+	std::vector<int> recv_sol_displs;
+      };
 
       template <std::size_t NOp>
       int_t flattenSuperLUIndex(const Coor<NOp>& anchor, const Coor<NOp>& dense,
@@ -4386,35 +4384,35 @@ namespace Chroma
 	return idx;
       }
 
-	      template <std::size_t NOp>
-	      SuperLUMatrixSetup<NOp>
-	      buildSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
-				      const std::string& prefix, MPI_Comm superlu_comm)
+      template <std::size_t NOp>
+      SuperLUMatrixSetup<NOp>
+      buildSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
+			      const std::string& prefix, MPI_Comm superlu_comm)
       {
 	SuperLUMatrixSetup<NOp> setup;
 	const auto img_dims = kvcoors<NOp>(local_blocks.sp.i.order, local_blocks.sp.i.kvdim());
 	const auto dom_dims = kvcoors<NOp>(local_blocks.sp.d.order, local_blocks.sp.d.kvdim());
 	const auto img_strides =
 	  superbblas::detail::get_strides<int_t>(img_dims, superbblas::FastToSlow);
-		const auto dom_strides =
-		  superbblas::detail::get_strides<int_t>(dom_dims, superbblas::FastToSlow);
-		const int_t global_rows = (int_t)volume(local_blocks.sp.i.kvdim(), local_blocks.sp.i.order);
-		const int_t global_cols = (int_t)volume(local_blocks.sp.d.kvdim(), local_blocks.sp.d.order);
-		if (global_rows != global_cols)
-		  throw std::runtime_error("SuperLU_DIST: only square scalar systems are supported");
-		const auto partition = getSuperLURowPartition(global_rows);
+	const auto dom_strides =
+	  superbblas::detail::get_strides<int_t>(dom_dims, superbblas::FastToSlow);
+	const int_t global_rows = (int_t)volume(local_blocks.sp.i.kvdim(), local_blocks.sp.i.order);
+	const int_t global_cols = (int_t)volume(local_blocks.sp.d.kvdim(), local_blocks.sp.d.order);
+	if (global_rows != global_cols)
+	  throw std::runtime_error("SuperLU_DIST: only square scalar systems are supported");
+	const auto partition = getSuperLURowPartition(global_rows);
 
 	setup.m = global_rows;
 	setup.n = global_cols;
 	setup.fst_row = partition.fst_row;
 	setup.m_loc = partition.m_loc;
 
-		std::vector<std::vector<SuperLUScalarRowRef<NOp>>> rows_by_peer(
-		  (std::size_t)partition.world);
-		std::vector<std::vector<SuperLUScalarRowRef<NOp>>> sol_rows_by_peer(
-		  (std::size_t)partition.world);
-		std::vector<std::vector<SuperLUScalarTriplet>> triplets_by_peer(
-		  (std::size_t)partition.world);
+	std::vector<std::vector<SuperLUScalarRowRef<NOp>>> rows_by_peer(
+	  (std::size_t)partition.world);
+	std::vector<std::vector<SuperLUScalarRowRef<NOp>>> sol_rows_by_peer(
+	  (std::size_t)partition.world);
+	std::vector<std::vector<SuperLUScalarTriplet>> triplets_by_peer(
+	  (std::size_t)partition.world);
 
 	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
 	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
@@ -4427,29 +4425,28 @@ namespace Chroma
 	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, owner, global_row});
 	  }
 
-		for (auto& rows : rows_by_peer)
-		  std::sort(rows.begin(), rows.end(),
-			    [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
-			      return a.global_row < b.global_row;
-			    });
+	for (auto& rows : rows_by_peer)
+	  std::sort(rows.begin(), rows.end(),
+		    [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
+		      return a.global_row < b.global_row;
+		    });
 
-		for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
-		  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
-		  {
-		    int_t global_col =
-		      flattenSuperLUIndex(local_blocks.dom_row_global_coors[row_idx],
-					  local_blocks.dense_dom_coors[dense_idx], dom_dims,
-					  dom_strides, "solution column");
-		    int owner = partition.ownerOf(global_col);
-		    sol_rows_by_peer[(std::size_t)owner].push_back(
-		      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, owner, global_col});
-		  }
+	for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
+	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
+	  {
+	    int_t global_col = flattenSuperLUIndex(local_blocks.dom_row_global_coors[row_idx],
+						   local_blocks.dense_dom_coors[dense_idx],
+						   dom_dims, dom_strides, "solution column");
+	    int owner = partition.ownerOf(global_col);
+	    sol_rows_by_peer[(std::size_t)owner].push_back(
+	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, owner, global_col});
+	  }
 
-		for (auto& rows : sol_rows_by_peer)
-		  std::sort(rows.begin(), rows.end(),
-			    [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
-			      return a.global_row < b.global_row;
-			    });
+	for (auto& rows : sol_rows_by_peer)
+	  std::sort(rows.begin(), rows.end(),
+		    [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
+		      return a.global_row < b.global_row;
+		    });
 
 	setup.send_row_counts.resize((std::size_t)partition.world, 0);
 	for (int peer = 0; peer < partition.world; ++peer)
@@ -4462,11 +4459,10 @@ namespace Chroma
 	setup.send_row_displs = getDispls(setup.send_row_counts);
 
 	std::vector<int_t> send_row_ids(setup.send_rows.size(), 0);
-		for (std::size_t i = 0; i < setup.send_rows.size(); ++i)
-		  send_row_ids[i] = setup.send_rows[i].global_row;
-		auto recv_row_ids =
-		  alltoallvPod(send_row_ids, setup.send_row_counts, setup.recv_row_counts, "row ids",
-			       superlu_comm);
+	for (std::size_t i = 0; i < setup.send_rows.size(); ++i)
+	  send_row_ids[i] = setup.send_rows[i].global_row;
+	auto recv_row_ids = alltoallvPod(send_row_ids, setup.send_row_counts, setup.recv_row_counts,
+					 "row ids", superlu_comm);
 	setup.recv_row_displs = getDispls(setup.recv_row_counts);
 	setup.recv_local_rows.resize(recv_row_ids.size(), 0);
 	for (std::size_t i = 0; i < recv_row_ids.size(); ++i)
@@ -4474,37 +4470,35 @@ namespace Chroma
 	  int_t row = recv_row_ids[i];
 	  if (row < partition.fst_row || row >= partition.fst_row + partition.m_loc)
 	    throw std::runtime_error("SuperLU_DIST: received a row outside the local slab");
-		  setup.recv_local_rows[i] = row - partition.fst_row;
-		}
+	  setup.recv_local_rows[i] = row - partition.fst_row;
+	}
 
-		setup.send_sol_counts.resize((std::size_t)partition.world, 0);
-		for (int peer = 0; peer < partition.world; ++peer)
-		{
-		  setup.send_sol_counts[(std::size_t)peer] =
-		    checkedSuperLUCount(sol_rows_by_peer[(std::size_t)peer].size(),
-					"solution redistribution");
-		  setup.send_sol_rows.insert(setup.send_sol_rows.end(),
-					     sol_rows_by_peer[(std::size_t)peer].begin(),
-					     sol_rows_by_peer[(std::size_t)peer].end());
-		}
-		setup.send_sol_displs = getDispls(setup.send_sol_counts);
+	setup.send_sol_counts.resize((std::size_t)partition.world, 0);
+	for (int peer = 0; peer < partition.world; ++peer)
+	{
+	  setup.send_sol_counts[(std::size_t)peer] = checkedSuperLUCount(
+	    sol_rows_by_peer[(std::size_t)peer].size(), "solution redistribution");
+	  setup.send_sol_rows.insert(setup.send_sol_rows.end(),
+				     sol_rows_by_peer[(std::size_t)peer].begin(),
+				     sol_rows_by_peer[(std::size_t)peer].end());
+	}
+	setup.send_sol_displs = getDispls(setup.send_sol_counts);
 
-		std::vector<int_t> send_sol_ids(setup.send_sol_rows.size(), 0);
-		for (std::size_t i = 0; i < setup.send_sol_rows.size(); ++i)
-		  send_sol_ids[i] = setup.send_sol_rows[i].global_row;
-		auto recv_sol_ids =
-		  alltoallvPod(send_sol_ids, setup.send_sol_counts, setup.recv_sol_counts,
-			       "solution ids", superlu_comm);
-		setup.recv_sol_displs = getDispls(setup.recv_sol_counts);
-		setup.recv_sol_local_rows.resize(recv_sol_ids.size(), 0);
-		for (std::size_t i = 0; i < recv_sol_ids.size(); ++i)
-		{
-		  int_t row = recv_sol_ids[i];
-		  if (row < partition.fst_row || row >= partition.fst_row + partition.m_loc)
-		    throw std::runtime_error(
-		      "SuperLU_DIST: received a solution row outside the local slab");
-		  setup.recv_sol_local_rows[i] = row - partition.fst_row;
-		}
+	std::vector<int_t> send_sol_ids(setup.send_sol_rows.size(), 0);
+	for (std::size_t i = 0; i < setup.send_sol_rows.size(); ++i)
+	  send_sol_ids[i] = setup.send_sol_rows[i].global_row;
+	auto recv_sol_ids = alltoallvPod(send_sol_ids, setup.send_sol_counts, setup.recv_sol_counts,
+					 "solution ids", superlu_comm);
+	setup.recv_sol_displs = getDispls(setup.recv_sol_counts);
+	setup.recv_sol_local_rows.resize(recv_sol_ids.size(), 0);
+	for (std::size_t i = 0; i < recv_sol_ids.size(); ++i)
+	{
+	  int_t row = recv_sol_ids[i];
+	  if (row < partition.fst_row || row >= partition.fst_row + partition.m_loc)
+	    throw std::runtime_error(
+	      "SuperLU_DIST: received a solution row outside the local slab");
+	  setup.recv_sol_local_rows[i] = row - partition.fst_row;
+	}
 
 	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
 	  for (std::size_t dense_r = 0; dense_r < local_blocks.bs; ++dense_r)
@@ -4543,9 +4537,8 @@ namespace Chroma
 	  send_triplets.insert(send_triplets.end(), peer_triplets.begin(), peer_triplets.end());
 	}
 
-		auto recv_triplets =
-		  alltoallvPod(send_triplets, send_triplet_counts, recv_triplet_counts,
-			       "matrix triplets", superlu_comm);
+	auto recv_triplets = alltoallvPod(send_triplets, send_triplet_counts, recv_triplet_counts,
+					  "matrix triplets", superlu_comm);
 	std::sort(recv_triplets.begin(), recv_triplets.end(),
 		  [](const SuperLUScalarTriplet& a, const SuperLUScalarTriplet& b) {
 		    return a.row < b.row || (a.row == b.row && a.col < b.col);
@@ -4620,16 +4613,16 @@ namespace Chroma
 	int npdep = getOption<int>(ops, "npdep");
 	if (nprow <= 0 || npcol <= 0 || npdep <= 0)
 	  throw std::runtime_error("getSuperLUSolver: grid dimensions must be positive");
-		if (nprow * npcol * npdep != Layout::numNodes())
-		  throw std::runtime_error(
-		    "getSuperLUSolver: v1 requires nprow*npcol*npdep == Layout::numNodes()");
-		MPI_Comm superlu_comm = MPI_COMM_WORLD;
-		int superlu_comm_size = 0;
-		if (MPI_Comm_size(superlu_comm, &superlu_comm_size) != MPI_SUCCESS)
-		  throw std::runtime_error("getSuperLUSolver: MPI_Comm_size failed");
-		if (superlu_comm_size != Layout::numNodes())
-		  throw std::runtime_error(
-		    "getSuperLUSolver: SuperLU communicator size must match Layout::numNodes()");
+	if (nprow * npcol * npdep != Layout::numNodes())
+	  throw std::runtime_error(
+	    "getSuperLUSolver: v1 requires nprow*npcol*npdep == Layout::numNodes()");
+	MPI_Comm superlu_comm = MPI_COMM_WORLD;
+	int superlu_comm_size = 0;
+	if (MPI_Comm_size(superlu_comm, &superlu_comm_size) != MPI_SUCCESS)
+	  throw std::runtime_error("getSuperLUSolver: MPI_Comm_size failed");
+	if (superlu_comm_size != Layout::numNodes())
+	  throw std::runtime_error(
+	    "getSuperLUSolver: SuperLU communicator size must match Layout::numNodes()");
 
 	SpTensor<NOp, NOp, ComplexD> sp;
 	remap rd;
@@ -4659,9 +4652,9 @@ namespace Chroma
 	  for (unsigned int p = 0; p < NOp; ++p)
 	    rd[sp.i.order[p]] = sp.d.order[p];
 
-		auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST");
-		auto setup = std::make_shared<SuperLUMatrixSetup<NOp>>(
-		  buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm));
+	auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST");
+	auto setup = std::make_shared<SuperLUMatrixSetup<NOp>>(
+	  buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm));
 
 	// Keep the explicit sparse conversion and the redistribution schedules in shared setup
 	// objects. Each solve call only packs the current RHS batch, calls SuperLU once, and
@@ -4673,106 +4666,102 @@ namespace Chroma
 	    if (nrhs == 0)
 	      return;
 
-		    std::map<char, int> x_sparse_kvdim = local_blocks.sp.i.kvdim();
-		    for (char c : order_cols)
-		      x_sparse_kvdim[c] = x.kvdim().at(c);
-		    auto xh =
-		      local_blocks.sp.i.template make_compatible<NOp + 1, ComplexD>(
-			local_blocks.sp.i.order + order_cols, x_sparse_kvdim, OnHost);
-		    x.copyTo(xh);
-		    auto y_sparse = y.rename_dims(rd);
-		    std::map<char, int> y_sparse_kvdim = local_blocks.sp.d.kvdim();
-		    for (char c : order_cols)
-		      y_sparse_kvdim[c] = x.kvdim().at(c);
-		    auto yh =
-		      local_blocks.sp.d.template make_compatible<NOp + 1, ComplexD>(
-			local_blocks.sp.d.order + order_cols, y_sparse_kvdim, OnHost);
-		    yh.set_zero();
-		    auto x_local = xh.getLocal();
-		    auto y_local = yh.getLocal();
+	    std::map<char, int> x_sparse_kvdim = local_blocks.sp.i.kvdim();
+	    for (char c : order_cols)
+	      x_sparse_kvdim[c] = x.kvdim().at(c);
+	    auto xh = local_blocks.sp.i.template make_compatible<NOp + 1, ComplexD>(
+	      local_blocks.sp.i.order + order_cols, x_sparse_kvdim, OnHost);
+	    x.copyTo(xh);
+	    auto y_sparse = y.rename_dims(rd);
+	    std::map<char, int> y_sparse_kvdim = local_blocks.sp.d.kvdim();
+	    for (char c : order_cols)
+	      y_sparse_kvdim[c] = x.kvdim().at(c);
+	    auto yh = local_blocks.sp.d.template make_compatible<NOp + 1, ComplexD>(
+	      local_blocks.sp.d.order + order_cols, y_sparse_kvdim, OnHost);
+	    yh.set_zero();
+	    auto x_local = xh.getLocal();
+	    auto y_local = yh.getLocal();
 
-		    const ComplexD* xptr = x_local.data();
-		    ComplexD* yptr = y_local.data();
-		    const auto x_strides =
-		      superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
-		    const auto y_strides =
-		      superbblas::detail::get_strides<std::size_t>(y_local.size, superbblas::FastToSlow);
+	    const ComplexD* xptr = x_local.data();
+	    ComplexD* yptr = y_local.data();
+	    const auto x_strides =
+	      superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
+	    const auto y_strides =
+	      superbblas::detail::get_strides<std::size_t>(y_local.size, superbblas::FastToSlow);
 
-		    auto checked_offset = [](std::size_t base, std::size_t rhs_off, std::size_t limit,
-					     const std::string& what) {
-		      if (base > limit || rhs_off > limit - base)
-			throw std::runtime_error("SuperLU_DIST: " + what +
-						 " tensor offset is out of bounds");
-		      return base + rhs_off;
-		    };
+	    auto checked_offset = [](std::size_t base, std::size_t rhs_off, std::size_t limit,
+				     const std::string& what) {
+	      if (base > limit || rhs_off > limit - base)
+		throw std::runtime_error("SuperLU_DIST: " + what +
+					 " tensor offset is out of bounds");
+	      return base + rhs_off;
+	    };
 
-		    auto rhs_offsets = [&](const auto& t, const auto& strides, const std::string& what) {
-		      std::vector<std::size_t> out(nrhs, 0);
-		      if (order_cols.empty())
-			return out;
-		      std::vector<int> rhs_sizes;
-		      rhs_sizes.reserve(order_cols.size());
-		      for (char c : order_cols)
-			rhs_sizes.push_back(t.kvdim().at(c));
-		      for (std::size_t c = 0; c < nrhs; ++c)
-		      {
-			std::size_t off = 0;
-			std::size_t tcol = c;
+	    auto rhs_offsets = [&](const auto& t, const auto& strides, const std::string& what) {
+	      std::vector<std::size_t> out(nrhs, 0);
+	      if (order_cols.empty())
+		return out;
+	      std::vector<int> rhs_sizes;
+	      rhs_sizes.reserve(order_cols.size());
+	      for (char c : order_cols)
+		rhs_sizes.push_back(t.kvdim().at(c));
+	      for (std::size_t c = 0; c < nrhs; ++c)
+	      {
+		std::size_t off = 0;
+		std::size_t tcol = c;
 		for (std::size_t k = 0; k < order_cols.size(); ++k)
-			{
-			  int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
-			  tcol /= (std::size_t)rhs_sizes[k];
-			  auto pos = t.order.find(order_cols[k]);
-			  if (pos == std::string::npos)
-			    throw std::runtime_error("SuperLU_DIST: missing RHS label `" +
-						     std::string(1, order_cols[k]) + "` in " + what +
-						     " tensor");
-			  off += (std::size_t)v * strides[(std::size_t)pos];
-			}
-			out[c] = off;
-		      }
-		      return out;
-		    };
+		{
+		  int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
+		  tcol /= (std::size_t)rhs_sizes[k];
+		  auto pos = t.order.find(order_cols[k]);
+		  if (pos == std::string::npos)
+		    throw std::runtime_error("SuperLU_DIST: missing RHS label `" +
+					     std::string(1, order_cols[k]) + "` in " + what +
+					     " tensor");
+		  off += (std::size_t)v * strides[(std::size_t)pos];
+		}
+		out[c] = off;
+	      }
+	      return out;
+	    };
 
-		    std::vector<std::size_t> x_rhs_off = rhs_offsets(x_local, x_strides, "RHS");
-		    std::vector<std::size_t> y_rhs_off = rhs_offsets(y_local, y_strides, "solution");
+	    std::vector<std::size_t> x_rhs_off = rhs_offsets(x_local, x_strides, "RHS");
+	    std::vector<std::size_t> y_rhs_off = rhs_offsets(y_local, y_strides, "solution");
 
-		    std::vector<std::size_t> x_dense_off(local_blocks.bs, 0);
-		    for (std::size_t b = 0; b < local_blocks.bs; ++b)
-		      for (unsigned int p = 0; p < NOp; ++p)
-			x_dense_off[b] +=
-			  (std::size_t)local_blocks.dense_img_coors[b][p] * x_strides[p];
+	    std::vector<std::size_t> x_dense_off(local_blocks.bs, 0);
+	    for (std::size_t b = 0; b < local_blocks.bs; ++b)
+	      for (unsigned int p = 0; p < NOp; ++p)
+		x_dense_off[b] += (std::size_t)local_blocks.dense_img_coors[b][p] * x_strides[p];
 
-		    std::vector<std::size_t> y_dense_off(local_blocks.bs, 0);
-		    for (std::size_t b = 0; b < local_blocks.bs; ++b)
-		      for (unsigned int p = 0; p < NOp; ++p)
-			y_dense_off[b] +=
-			  (std::size_t)local_blocks.dense_dom_coors[b][p] * y_strides[p];
+	    std::vector<std::size_t> y_dense_off(local_blocks.bs, 0);
+	    for (std::size_t b = 0; b < local_blocks.bs; ++b)
+	      for (unsigned int p = 0; p < NOp; ++p)
+		y_dense_off[b] += (std::size_t)local_blocks.dense_dom_coors[b][p] * y_strides[p];
 
-		    std::vector<std::size_t> x_row_off(local_blocks.nrows, 0);
-		    for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
-		      for (unsigned int p = 0; p < NOp; ++p)
-			x_row_off[row_idx] +=
-			  (std::size_t)local_blocks.row_local_coors[row_idx][p] * x_strides[p];
+	    std::vector<std::size_t> x_row_off(local_blocks.nrows, 0);
+	    for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	      for (unsigned int p = 0; p < NOp; ++p)
+		x_row_off[row_idx] +=
+		  (std::size_t)local_blocks.row_local_coors[row_idx][p] * x_strides[p];
 
-		    std::vector<std::size_t> y_row_off(local_blocks.dom_nrows, 0);
-		    for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
-		      for (unsigned int p = 0; p < NOp; ++p)
-			y_row_off[row_idx] +=
-			  (std::size_t)local_blocks.dom_row_local_coors[row_idx][p] * y_strides[p];
+	    std::vector<std::size_t> y_row_off(local_blocks.dom_nrows, 0);
+	    for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
+	      for (unsigned int p = 0; p < NOp; ++p)
+		y_row_off[row_idx] +=
+		  (std::size_t)local_blocks.dom_row_local_coors[row_idx][p] * y_strides[p];
 
 	    // SuperLU expects each rank to own a contiguous global row slab, so the RHS must be
 	    // redistributed from Chroma's native layout before the solve and sent back afterwards.
 	    std::vector<doublecomplex> send_rhs(setup->send_rows.size() * nrhs,
 						doublecomplex{0, 0});
-		    for (std::size_t i = 0; i < setup->send_rows.size(); ++i)
-		    {
-		      const auto& row = setup->send_rows[i];
-		      std::size_t base = x_row_off[row.row_idx] + x_dense_off[row.dense_idx];
-		      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-			send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(xptr[checked_offset(
-			  base, x_rhs_off[rhs], x_local.localVolume(), "RHS")]));
-		    }
+	    for (std::size_t i = 0; i < setup->send_rows.size(); ++i)
+	    {
+	      const auto& row = setup->send_rows[i];
+	      std::size_t base = x_row_off[row.row_idx] + x_dense_off[row.dense_idx];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(
+		  xptr[checked_offset(base, x_rhs_off[rhs], x_local.localVolume(), "RHS")]));
+	    }
 
 	    auto scale_counts = [&](const std::vector<int>& counts, const std::string& what) {
 	      std::vector<int> out(counts.size(), 0);
@@ -4782,12 +4771,12 @@ namespace Chroma
 	    };
 
 	    std::vector<int> recv_rhs_counts;
-		    auto recv_rhs =
-		      alltoallvPod(send_rhs, scale_counts(setup->send_row_counts, "rhs values"),
-				   recv_rhs_counts, "rhs values", superlu_comm);
-		    (void)recv_rhs_counts;
-		    if (recv_rhs.size() != setup->recv_local_rows.size() * nrhs)
-		      throw std::runtime_error("SuperLU_DIST: received RHS value count mismatch");
+	    auto recv_rhs =
+	      alltoallvPod(send_rhs, scale_counts(setup->send_row_counts, "rhs values"),
+			   recv_rhs_counts, "rhs values", superlu_comm);
+	    (void)recv_rhs_counts;
+	    if (recv_rhs.size() != setup->recv_local_rows.size() * nrhs)
+	      throw std::runtime_error("SuperLU_DIST: received RHS value count mismatch");
 
 	    int_t ldb = std::max<int_t>((int_t)1, setup->m_loc);
 	    std::vector<doublecomplex> b((std::size_t)ldb * nrhs, doublecomplex{0.0, 0.0});
@@ -4815,29 +4804,29 @@ namespace Chroma
 	      bool grid_init = false;
 	      bool matrix_init = false;
 	      bool scaleperm_init = false;
-		      bool lu_init = false;
-		      bool stat_init = false;
-		      bool solve_init = false;
-		      bool a3d_init = false;
+	      bool lu_init = false;
+	      bool stat_init = false;
+	      bool solve_init = false;
+	      bool a3d_init = false;
 
-		      ~SolveScope()
-		      {
-			if (matrix_init)
-			  Destroy_CompRowLoc_Matrix_dist(&A);
-			if (solve_init)
-			  zSolveFinalize(options, &SOLVEstruct);
-			if (lu_init)
-			  zDestroy_LU(n, &grid.grid2d, &LUstruct);
-			if (a3d_init)
-			  zDestroy_A3d_gathered_on_2d(&SOLVEstruct, &grid);
-			if (scaleperm_init)
-			  zScalePermstructFree(&ScalePermstruct);
-			if (lu_init)
-			  zLUstructFree(&LUstruct);
-			if (stat_init)
-			  PStatFree(&stat);
-			if (grid_init)
-			{
+	      ~SolveScope()
+	      {
+		if (matrix_init)
+		  Destroy_CompRowLoc_Matrix_dist(&A);
+		if (solve_init)
+		  zSolveFinalize(options, &SOLVEstruct);
+		if (lu_init)
+		  zDestroy_LU(n, &grid.grid2d, &LUstruct);
+		if (a3d_init)
+		  zDestroy_A3d_gathered_on_2d(&SOLVEstruct, &grid);
+		if (scaleperm_init)
+		  zScalePermstructFree(&ScalePermstruct);
+		if (lu_init)
+		  zLUstructFree(&LUstruct);
+		if (stat_init)
+		  PStatFree(&stat);
+		if (grid_init)
+		{
 		  // Keep grid teardown at the top solve scope so this runs exactly once per
 		  // SuperLU solve invocation, never once per RHS.
 		  detail::log(1, prefix + " calling superlu_gridexit3d");
@@ -4849,7 +4838,7 @@ namespace Chroma
 	    scope.options = &options;
 	    scope.n = setup->n;
 
-		    superlu_gridinit3d(superlu_comm, nprow, npcol, npdep, &scope.grid);
+	    superlu_gridinit3d(superlu_comm, nprow, npcol, npdep, &scope.grid);
 	    scope.grid_init = true;
 
 	    int_t* rowptr = intMalloc_dist(setup->m_loc + 1);
@@ -4878,39 +4867,39 @@ namespace Chroma
 	    std::vector<double> berr(std::max<std::size_t>(nrhs, 1), 0.0);
 	    int info = 0;
 	    pzgssvx3d(&options, &scope.A, &scope.ScalePermstruct, b.data(), ldb,
-			      checkedSuperLUCount(nrhs, "nrhs"), &scope.grid, &scope.LUstruct,
-			      &scope.SOLVEstruct, berr.data(), &scope.stat, &info);
-		    scope.solve_init = true;
-		    scope.a3d_init = scope.SOLVEstruct.A3d != nullptr;
-		    if (info != 0)
-		      throw std::runtime_error("SuperLU_DIST: pzgssvx3d failed with info=" +
-					       std::to_string(info));
+		      checkedSuperLUCount(nrhs, "nrhs"), &scope.grid, &scope.LUstruct,
+		      &scope.SOLVEstruct, berr.data(), &scope.stat, &info);
+	    scope.solve_init = true;
+	    scope.a3d_init = scope.SOLVEstruct.A3d != nullptr;
+	    if (info != 0)
+	      throw std::runtime_error("SuperLU_DIST: pzgssvx3d failed with info=" +
+				       std::to_string(info));
 
-		    std::vector<doublecomplex> send_sol;
-		    send_sol.reserve(setup->recv_sol_local_rows.size() * nrhs);
-		    for (std::size_t i = 0; i < setup->recv_sol_local_rows.size(); ++i)
-		    {
-		      int_t local_row = setup->recv_sol_local_rows[i];
-		      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-			send_sol.push_back(b[(std::size_t)local_row + rhs * (std::size_t)ldb]);
-		    }
+	    std::vector<doublecomplex> send_sol;
+	    send_sol.reserve(setup->recv_sol_local_rows.size() * nrhs);
+	    for (std::size_t i = 0; i < setup->recv_sol_local_rows.size(); ++i)
+	    {
+	      int_t local_row = setup->recv_sol_local_rows[i];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		send_sol.push_back(b[(std::size_t)local_row + rhs * (std::size_t)ldb]);
+	    }
 
-		    std::vector<int> recv_sol_counts;
-		    auto recv_sol =
-		      alltoallvPod(send_sol, scale_counts(setup->recv_sol_counts, "solution values"),
-				   recv_sol_counts, "solution values", superlu_comm);
-		    (void)recv_sol_counts;
-		    if (recv_sol.size() != setup->send_sol_rows.size() * nrhs)
-		      throw std::runtime_error("SuperLU_DIST: received solution value count mismatch");
+	    std::vector<int> recv_sol_counts;
+	    auto recv_sol =
+	      alltoallvPod(send_sol, scale_counts(setup->recv_sol_counts, "solution values"),
+			   recv_sol_counts, "solution values", superlu_comm);
+	    (void)recv_sol_counts;
+	    if (recv_sol.size() != setup->send_sol_rows.size() * nrhs)
+	      throw std::runtime_error("SuperLU_DIST: received solution value count mismatch");
 
-		    for (std::size_t i = 0; i < setup->send_sol_rows.size(); ++i)
-		    {
-		      const auto& row = setup->send_sol_rows[i];
-		      std::size_t base = y_row_off[row.row_idx] + y_dense_off[row.dense_idx];
-		      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-			yptr[checked_offset(base, y_rhs_off[rhs], y_local.localVolume(), "solution")] =
-			  fromSuperLUComplex(recv_sol[i * nrhs + rhs]);
-		    }
+	    for (std::size_t i = 0; i < setup->send_sol_rows.size(); ++i)
+	    {
+	      const auto& row = setup->send_sol_rows[i];
+	      std::size_t base = y_row_off[row.row_idx] + y_dense_off[row.dense_idx];
+	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		yptr[checked_offset(base, y_rhs_off[rhs], y_local.localVolume(), "solution")] =
+		  fromSuperLUComplex(recv_sol[i * nrhs + rhs]);
+	    }
 
 	    yh.copyTo(y_sparse);
 	  },

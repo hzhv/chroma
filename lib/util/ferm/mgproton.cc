@@ -777,6 +777,9 @@ namespace Chroma
 	throw std::runtime_error(
 	  "mr: Either the input or the output vector isn't compatible with the "
 	  "operator");
+      if (prec && (!prec.d.is_compatible(op.i) || !op.d.is_compatible(prec.i)))
+	throw std::runtime_error(
+	  "mr: the preconditioner domain/image spaces are not compatible with the operator");
 
       // Get an unused label for the search subspace columns
       std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
@@ -807,12 +810,12 @@ namespace Chroma
 	return;
 
       // Do the iterations
-      auto normr = normr0.clone();		///< residual norms
-      unsigned int it = 0;			///< iteration number
-      double max_tol = HUGE_VAL;		///< maximum residual norm
-      unsigned int residual_updates = 0;	///< number of residual updates
-      auto p = r.make_compatible();		///< p will hold A * prec * r
-      auto kr = prec ? r.make_compatible() : r; ///< p will hold prec * r
+      auto normr = normr0.clone();	 ///< residual norms
+      unsigned int it = 0;		 ///< iteration number
+      double max_tol = HUGE_VAL;	 ///< maximum residual norm
+      unsigned int residual_updates = 0; ///< number of residual updates
+      auto p = r.make_compatible();	 ///< p will hold A * prec * r
+      auto kr = prec ? prec.template make_compatible_img<NOp + 1>(order_cols, x.kvdim()) : r;
       for (it = 0; it < max_its;)
       {
 	// kr = prec * r
@@ -1092,6 +1095,9 @@ namespace Chroma
 	throw std::runtime_error(
 	  "mr: Either the input or the output vector isn't compatible with the "
 	  "operator");
+      if (prec && (!prec.d.is_compatible(op.i) || !op.d.is_compatible(prec.i)))
+	throw std::runtime_error(
+	  "gcr: the preconditioner domain/image spaces are not compatible with the operator");
 
       // Get an unused label for the search subspace columns
       char Vc = detail::get_free_label(x.order);
@@ -1122,22 +1128,23 @@ namespace Chroma
       if (max(normr0) == 0)
 	return;
 
-      // Allocate the search subspace P (onto the left singular space), and
-      // AP (= op * P)
-      auto P = r.template make_compatible<NOp + 2>(std::string({'%', Vc}), '%', "",
-						   {{Vc, max_basis_size}});
-      auto AP = P.make_compatible();
+      auto kr = prec ? prec.template make_compatible_img<NOp + 1>(order_cols, x.kvdim()) : r;
+
+      // Allocate the search subspace P and AP (= op * P).
+      auto P = kr.template make_compatible<NOp + 2>(std::string({'%', Vc}), '%', "",
+						    {{Vc, max_basis_size}});
+      auto AP = r.template make_compatible<NOp + 2>(std::string({'%', Vc}), '%', "",
+						    {{Vc, max_basis_size}});
 
       // Do the iterations
-      auto normr = normr0.clone();		///< residual norms
-      unsigned int it = 0;			///< iteration number
-      double max_tol = HUGE_VAL;		///< maximum residual norm
-      unsigned int residual_updates = 0;	///< number of residual updates
-      auto p = r.make_compatible();		///< p will hold the next column in P
-      auto Ap = r.make_compatible();		///< Ap will hold the next column in AP
-      auto kr = prec ? r.make_compatible() : r; ///< p will hold prec * r
-      auto Akr = r.make_compatible();		///< Akr will hold A * kr
-      unsigned int active_P = 0;		///< number of active columns in P and AP
+      auto normr = normr0.clone();	 ///< residual norms
+      unsigned int it = 0;		 ///< iteration number
+      double max_tol = HUGE_VAL;	 ///< maximum residual norm
+      unsigned int residual_updates = 0; ///< number of residual updates
+      auto p = kr.make_compatible();	 ///< p will hold the next column in P
+      auto Ap = r.make_compatible();	 ///< Ap will hold the next column in AP
+      auto Akr = r.make_compatible();	 ///< Akr will hold A * kr
+      unsigned int active_P = 0;	 ///< number of active columns in P and AP
       auto AP_norm2 = P.template like_this<2>(order_cols + std::string{Vc}, {}, none,
 					      detail::compatible_replicated_distribution(P.dist));
       for (it = 0; it < max_its;)
@@ -3621,6 +3628,11 @@ namespace Chroma
 	    auto dom_coor = jj_ptr[col0];
 	    for (unsigned int q = 0; q < sp.nblockd + sp.nkrond; ++q)
 	      dom_coor[q] = 0;
+	    using superbblas::detail::operator+;
+	    // Sparse column coordinates are stored relative to the local domain partition.
+	    // Promote them back to global anchor coordinates before later code decides
+	    // rank ownership or filters to the current DD-local domain.
+	    dom_coor = dom_coor + dom_local_from;
 
 	    auto blk_src =
 	      data_row.kvslice_from_size({{'u', (int)col}}, {{'u', 1}}).make_sure(none, OnHost);
@@ -4584,6 +4596,180 @@ namespace Chroma
 			 " nnz=" + std::to_string((long long)setup.nnz_loc));
 	return setup;
       }
+
+      template <std::size_t NOp>
+      bool getLocalSuperLUCoordinate(const Coor<NOp>& global_anchor, const Coor<NOp>& dense,
+				     const Coor<NOp>& local_from, const Coor<NOp>& local_size,
+				     Coor<NOp>& local_coor)
+      {
+	for (unsigned int p = 0; p < NOp; ++p)
+	{
+	  int_t global = (int_t)global_anchor[p] + (int_t)dense[p];
+	  int_t from = (int_t)local_from[p];
+	  int_t size = (int_t)local_size[p];
+	  if (global < from || global >= from + size)
+	    return false;
+	  local_coor[p] = (int)(global - from);
+	}
+	return true;
+      }
+
+      template <std::size_t NOp>
+      SuperLUMatrixSetup<NOp>
+      buildLocalSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
+				   const Tensor<NOp, ComplexD>& img,
+				   const Tensor<NOp, ComplexD>& dom, const std::string& prefix)
+      {
+	SuperLUMatrixSetup<NOp> setup;
+	const Coor<NOp> zero{{}};
+	const auto img_local_from = img.dist == Local ? zero : img.p->localFrom();
+	const auto dom_local_from = dom.dist == Local ? zero : dom.p->localFrom();
+	const auto img_local_dims = img.dist == Local ? img.size : img.p->localSize();
+	const auto dom_local_dims = dom.dist == Local ? dom.size : dom.p->localSize();
+	const auto img_local_strides =
+	  superbblas::detail::get_strides<int_t>(img_local_dims, superbblas::FastToSlow);
+	const auto dom_local_strides =
+	  superbblas::detail::get_strides<int_t>(dom_local_dims, superbblas::FastToSlow);
+
+	setup.m = (int_t)superbblas::detail::volume(img_local_dims);
+	setup.n = (int_t)superbblas::detail::volume(dom_local_dims);
+	if (setup.m != setup.n)
+	  throw std::runtime_error("SuperLU_DIST: local DD solve requires square local blocks");
+	setup.fst_row = 0;
+	setup.m_loc = setup.m;
+
+	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
+	  {
+	    Coor<NOp> local_row_coor{{}};
+	    if (!getLocalSuperLUCoordinate(local_blocks.row_global_coors[row_idx],
+					   local_blocks.dense_img_coors[dense_idx], img_local_from,
+					   img_local_dims, local_row_coor))
+	      continue;
+	    int_t local_row = flattenSuperLUIndex(local_row_coor, zero, img_local_dims,
+						  img_local_strides, "local DD row");
+	    setup.send_rows.push_back(SuperLUScalarRowRef<NOp>{row_idx, dense_idx, 0, local_row});
+	  }
+	std::sort(setup.send_rows.begin(), setup.send_rows.end(),
+		  [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
+		    return a.global_row < b.global_row;
+		  });
+	if ((int_t)setup.send_rows.size() != setup.m)
+	  throw std::runtime_error("SuperLU_DIST: local DD row count mismatch");
+	for (int_t row = 0; row < setup.m; ++row)
+	  if (setup.send_rows[(std::size_t)row].global_row != row)
+	    throw std::runtime_error("SuperLU_DIST: local DD row layout is not compact");
+
+	for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
+	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
+	  {
+	    Coor<NOp> local_row_coor{{}};
+	    if (!getLocalSuperLUCoordinate(local_blocks.dom_row_global_coors[row_idx],
+					   local_blocks.dense_dom_coors[dense_idx], dom_local_from,
+					   dom_local_dims, local_row_coor))
+	      continue;
+	    int_t local_row = flattenSuperLUIndex(local_row_coor, zero, dom_local_dims,
+						  dom_local_strides, "local DD solution row");
+	    setup.send_sol_rows.push_back(
+	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, 0, local_row});
+	  }
+	std::sort(setup.send_sol_rows.begin(), setup.send_sol_rows.end(),
+		  [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
+		    return a.global_row < b.global_row;
+		  });
+	if ((int_t)setup.send_sol_rows.size() != setup.n)
+	  throw std::runtime_error("SuperLU_DIST: local DD solution row count mismatch");
+	for (int_t row = 0; row < setup.n; ++row)
+	  if (setup.send_sol_rows[(std::size_t)row].global_row != row)
+	    throw std::runtime_error("SuperLU_DIST: local DD solution layout is not compact");
+
+	setup.send_row_counts = {checkedSuperLUCount(setup.send_rows.size(), "local DD rows")};
+	setup.recv_row_counts = setup.send_row_counts;
+	setup.send_row_displs = getDispls(setup.send_row_counts);
+	setup.recv_row_displs = setup.send_row_displs;
+	setup.recv_local_rows.resize(setup.send_rows.size(), 0);
+	for (std::size_t i = 0; i < setup.send_rows.size(); ++i)
+	  setup.recv_local_rows[i] = setup.send_rows[i].global_row;
+
+	setup.send_sol_counts = {
+	  checkedSuperLUCount(setup.send_sol_rows.size(), "local DD solution rows")};
+	setup.recv_sol_counts = setup.send_sol_counts;
+	setup.send_sol_displs = getDispls(setup.send_sol_counts);
+	setup.recv_sol_displs = setup.send_sol_displs;
+	setup.recv_sol_local_rows.resize(setup.send_sol_rows.size(), 0);
+	for (std::size_t i = 0; i < setup.send_sol_rows.size(); ++i)
+	  setup.recv_sol_local_rows[i] = setup.send_sol_rows[i].global_row;
+
+	std::vector<SuperLUScalarTriplet> triplets;
+	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	  for (std::size_t dense_r = 0; dense_r < local_blocks.bs; ++dense_r)
+	  {
+	    Coor<NOp> local_row_coor{{}};
+	    if (!getLocalSuperLUCoordinate(local_blocks.row_global_coors[row_idx],
+					   local_blocks.dense_img_coors[dense_r], img_local_from,
+					   img_local_dims, local_row_coor))
+	      continue;
+	    int_t local_row = flattenSuperLUIndex(local_row_coor, zero, img_local_dims,
+						  img_local_strides, "local DD matrix row");
+
+	    for (const auto& block_entry : local_blocks.rows[row_idx])
+	      for (std::size_t dense_c = 0; dense_c < local_blocks.bs; ++dense_c)
+	      {
+		const ComplexD value = block_entry.data[dense_r * local_blocks.bs + dense_c];
+		if (value == ComplexD{})
+		  continue;
+
+		Coor<NOp> local_col{{}};
+		if (!getLocalSuperLUCoordinate(block_entry.dom_coor,
+					       local_blocks.dense_dom_coors[dense_c],
+					       dom_local_from, dom_local_dims, local_col))
+		  continue;
+
+		int_t local_col_idx = flattenSuperLUIndex(
+		  local_col, zero, dom_local_dims, dom_local_strides, "local DD matrix column");
+		triplets.push_back({local_row, local_col_idx, toSuperLUComplex(value)});
+	      }
+	  }
+
+	std::sort(triplets.begin(), triplets.end(),
+		  [](const SuperLUScalarTriplet& a, const SuperLUScalarTriplet& b) {
+		    return a.row < b.row || (a.row == b.row && a.col < b.col);
+		  });
+
+	setup.rowptr.assign((std::size_t)setup.m_loc + 1, 0);
+	int_t local_row = 0;
+	for (const auto& entry : triplets)
+	{
+	  if (entry.row < 0 || entry.row >= setup.m_loc)
+	    throw std::runtime_error("SuperLU_DIST: local DD matrix row is out of bounds");
+	  while (local_row < entry.row)
+	  {
+	    setup.rowptr[(std::size_t)local_row + 1] = (int_t)setup.colind.size();
+	    ++local_row;
+	  }
+
+	  if (!setup.colind.empty() && local_row == entry.row && setup.colind.back() == entry.col)
+	  {
+	    setup.nzval.back().r += entry.val.r;
+	    setup.nzval.back().i += entry.val.i;
+	  }
+	  else
+	  {
+	    setup.colind.push_back(entry.col);
+	    setup.nzval.push_back(entry.val);
+	  }
+	}
+	while (local_row < setup.m_loc)
+	{
+	  setup.rowptr[(std::size_t)local_row + 1] = (int_t)setup.colind.size();
+	  ++local_row;
+	}
+	setup.nnz_loc = (int_t)setup.colind.size();
+
+	detail::log(1, prefix + " SuperLU local DD rows=" + std::to_string((long long)setup.m_loc) +
+			 " nnz=" + std::to_string((long long)setup.nnz_loc));
+	return setup;
+      }
 #  endif
 
       template <std::size_t NOp>
@@ -4608,19 +4794,36 @@ namespace Chroma
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
 	Tracker _t(std::string("setup SuperLU_DIST solver ") + prefix);
 
-	int nprow = getOption<int>(ops, "nprow");
-	int npcol = getOption<int>(ops, "npcol");
-	int npdep = getOption<int>(ops, "npdep");
+	const bool local_superlu =
+	  op.d.dist == Glocal || op.d.dist == Local || op.i.dist == Glocal || op.i.dist == Local;
+	if (local_superlu && !((op.d.dist == Glocal || op.d.dist == Local) &&
+			       (op.i.dist == Glocal || op.i.dist == Local)))
+	  throw std::runtime_error(
+	    "getSuperLUSolver: local SuperLU requires local domain and image spaces");
+
+	int nprow = getOption<int>(ops, "nprow", local_superlu ? 1 : 0);
+	int npcol = getOption<int>(ops, "npcol", local_superlu ? 1 : 0);
+	int npdep = getOption<int>(ops, "npdep", local_superlu ? 1 : 0);
 	if (nprow <= 0 || npcol <= 0 || npdep <= 0)
 	  throw std::runtime_error("getSuperLUSolver: grid dimensions must be positive");
-	if (nprow * npcol * npdep != Layout::numNodes())
+	MPI_Comm superlu_comm = local_superlu ? MPI_COMM_SELF : MPI_COMM_WORLD;
+	if (local_superlu)
+	{
+	  if (nprow != 1 || npcol != 1 || npdep != 1)
+	    detail::log(1, prefix + " SuperLU local DD mode uses a forced 1x1x1 process grid");
+	  nprow = 1;
+	  npcol = 1;
+	  npdep = 1;
+	}
+	else if (nprow * npcol * npdep != Layout::numNodes())
+	{
 	  throw std::runtime_error(
 	    "getSuperLUSolver: v1 requires nprow*npcol*npdep == Layout::numNodes()");
-	MPI_Comm superlu_comm = MPI_COMM_WORLD;
+	}
 	int superlu_comm_size = 0;
 	if (MPI_Comm_size(superlu_comm, &superlu_comm_size) != MPI_SUCCESS)
 	  throw std::runtime_error("getSuperLUSolver: MPI_Comm_size failed");
-	if (superlu_comm_size != Layout::numNodes())
+	if (!local_superlu && superlu_comm_size != Layout::numNodes())
 	  throw std::runtime_error(
 	    "getSuperLUSolver: SuperLU communicator size must match Layout::numNodes()");
 
@@ -4652,9 +4855,13 @@ namespace Chroma
 	  for (unsigned int p = 0; p < NOp; ++p)
 	    rd[sp.i.order[p]] = sp.d.order[p];
 
+	// Match the DD-local ILU path here: extract the local rows directly from the glocal sparse
+	// operator view. Forcing `sp.getLocal()` reindexes the row anchors differently from the RHS
+	// tensor layout and produces out-of-bounds local row offsets on multi-rank DD solves.
 	auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST");
 	auto setup = std::make_shared<SuperLUMatrixSetup<NOp>>(
-	  buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm));
+	  local_superlu ? buildLocalSuperLUMatrixSetup(local_blocks, op.i, op.d, prefix)
+			: buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm));
 
 	// Keep the explicit sparse conversion and the redistribution schedules in shared setup
 	// objects. Each solve call only packs the current RHS batch, calls SuperLU once, and
@@ -4669,15 +4876,20 @@ namespace Chroma
 	    std::map<char, int> x_sparse_kvdim = local_blocks.sp.i.kvdim();
 	    for (char c : order_cols)
 	      x_sparse_kvdim[c] = x.kvdim().at(c);
-	    auto xh = local_blocks.sp.i.template make_compatible<NOp + 1, ComplexD>(
-	      local_blocks.sp.i.order + order_cols, x_sparse_kvdim, OnHost);
-	    x.copyTo(xh);
 	    auto y_sparse = y.rename_dims(rd);
 	    std::map<char, int> y_sparse_kvdim = local_blocks.sp.d.kvdim();
 	    for (char c : order_cols)
 	      y_sparse_kvdim[c] = x.kvdim().at(c);
-	    auto yh = local_blocks.sp.d.template make_compatible<NOp + 1, ComplexD>(
-	      local_blocks.sp.d.order + order_cols, y_sparse_kvdim, OnHost);
+	    auto xh = local_superlu
+			? x.make_sure(local_blocks.sp.i.order + order_cols, OnHost)
+			: local_blocks.sp.i.template make_compatible<NOp + 1, ComplexD>(
+			    local_blocks.sp.i.order + order_cols, x_sparse_kvdim, OnHost);
+	    if (!local_superlu)
+	      x.copyTo(xh);
+	    auto yh = local_superlu
+			? y_sparse.make_compatible(local_blocks.sp.d.order + order_cols, {}, OnHost)
+			: local_blocks.sp.d.template make_compatible<NOp + 1, ComplexD>(
+			    local_blocks.sp.d.order + order_cols, y_sparse_kvdim, OnHost);
 	    yh.set_zero();
 	    auto x_local = xh.getLocal();
 	    auto y_local = yh.getLocal();
@@ -4689,11 +4901,14 @@ namespace Chroma
 	    const auto y_strides =
 	      superbblas::detail::get_strides<std::size_t>(y_local.size, superbblas::FastToSlow);
 
-	    auto checked_offset = [](std::size_t base, std::size_t rhs_off, std::size_t limit,
-				     const std::string& what) {
+	    auto checked_offset = [&](std::size_t base, std::size_t rhs_off, std::size_t limit,
+				      const std::string& what, Maybe<std::string> extra = none) {
 	      if (base > limit || rhs_off > limit - base)
-		throw std::runtime_error("SuperLU_DIST: " + what +
-					 " tensor offset is out of bounds");
+		throw std::runtime_error(
+		  "SuperLU_DIST: " + what +
+		  " tensor offset is out of bounds (base=" + std::to_string(base) +
+		  ", rhs_off=" + std::to_string(rhs_off) + ", limit=" + std::to_string(limit) +
+		  (extra ? ", " + extra.getSome() : std::string{}) + ")");
 	      return base + rhs_off;
 	    };
 
@@ -4757,10 +4972,17 @@ namespace Chroma
 	    for (std::size_t i = 0; i < setup->send_rows.size(); ++i)
 	    {
 	      const auto& row = setup->send_rows[i];
-	      std::size_t base = x_row_off[row.row_idx] + x_dense_off[row.dense_idx];
+	      std::size_t base = local_superlu
+				   ? (std::size_t)row.global_row
+				   : x_row_off[row.row_idx] + x_dense_off[row.dense_idx];
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-		send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(
-		  xptr[checked_offset(base, x_rhs_off[rhs], x_local.localVolume(), "RHS")]));
+		send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(xptr[checked_offset(
+		  base, x_rhs_off[rhs], x_local.volume(), "RHS",
+		  std::string("row_idx=") + std::to_string(row.row_idx) +
+		    ", dense_idx=" + std::to_string(row.dense_idx) + ", global_row=" +
+		    std::to_string((long long)row.global_row) + ", x_local_volume=" +
+		    std::to_string(x_local.volume()) + ", x_local_localVolume=" +
+		    std::to_string(x_local.localVolume()) + ", nrhs=" + std::to_string(nrhs))]));
 	    }
 
 	    auto scale_counts = [&](const std::vector<int>& counts, const std::string& what) {
@@ -4895,9 +5117,11 @@ namespace Chroma
 	    for (std::size_t i = 0; i < setup->send_sol_rows.size(); ++i)
 	    {
 	      const auto& row = setup->send_sol_rows[i];
-	      std::size_t base = y_row_off[row.row_idx] + y_dense_off[row.dense_idx];
+	      std::size_t base = local_superlu
+				   ? (std::size_t)row.global_row
+				   : y_row_off[row.row_idx] + y_dense_off[row.dense_idx];
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-		yptr[checked_offset(base, y_rhs_off[rhs], y_local.localVolume(), "solution")] =
+		yptr[checked_offset(base, y_rhs_off[rhs], y_local.volume(), "solution")] =
 		  fromSuperLUComplex(recv_sol[i * nrhs + rhs]);
 	    }
 

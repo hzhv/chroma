@@ -4261,6 +4261,51 @@ namespace Chroma
 	return (int)n;
       }
 
+      struct SuperLUOptionOverrides {
+	bool has_ilu_level = false;
+	int ilu_level = SLU_EMPTY;
+	IterRefine_t iter_refine = NOREFINE;
+      };
+
+      inline const std::map<std::string, IterRefine_t>& getSuperLUIterRefineMap()
+      {
+	static const std::map<std::string, IterRefine_t> m{
+	  {"none", NOREFINE},	   {"no", NOREFINE},	   {"norefine", NOREFINE},
+	  {"no_refine", NOREFINE}, {"single", SLU_SINGLE}, {"double", SLU_DOUBLE},
+	  {"extra", SLU_EXTRA}};
+	return m;
+      }
+
+      inline SuperLUOptionOverrides getSuperLUOptionOverrides(const Options& ops)
+      {
+	SuperLUOptionOverrides out;
+	out.iter_refine =
+	  getOption<IterRefine_t>(ops, "iter_refine", getSuperLUIterRefineMap(), NOREFINE);
+
+	auto ilu_level = ops.getValueMaybe("ilu_level");
+	auto ILU_level = ops.getValueMaybe("ILU_level");
+	if (ilu_level && ILU_level)
+	  ops.getValue("ILU_level").throw_error("set only one of `ilu_level' and `ILU_level'");
+	if (ilu_level || ILU_level)
+	{
+	  const std::string path = ilu_level ? "ilu_level" : "ILU_level";
+	  out.has_ilu_level = true;
+	  out.ilu_level = getOption<int>(ops, path);
+	  if (out.ilu_level != 0)
+	    ops.getValue(path).throw_error("SuperLU_DIST only supports ILU_level=0");
+	}
+
+	return out;
+      }
+
+      inline void applySuperLUOptionOverrides(const SuperLUOptionOverrides& overrides,
+					      superlu_dist_options_t& options)
+      {
+	options.IterRefine = overrides.iter_refine;
+	if (overrides.has_ilu_level)
+	  options.ILU_level = overrides.ilu_level;
+      }
+
       inline std::vector<int> getDispls(const std::vector<int>& counts)
       {
 	std::vector<int> displs(counts.size(), 0);
@@ -4573,7 +4618,9 @@ namespace Chroma
 	    ++local_row;
 	  }
 
-	  if (!setup.colind.empty() && local_row == row && setup.colind.back() == entry.col)
+	  const bool have_entry_in_current_row =
+	    (std::size_t)setup.rowptr[(std::size_t)local_row] < setup.colind.size();
+	  if (have_entry_in_current_row && setup.colind.back() == entry.col)
 	  {
 	    setup.nzval.back().r += entry.val.r;
 	    setup.nzval.back().i += entry.val.i;
@@ -4748,7 +4795,9 @@ namespace Chroma
 	    ++local_row;
 	  }
 
-	  if (!setup.colind.empty() && local_row == entry.row && setup.colind.back() == entry.col)
+	  const bool have_entry_in_current_row =
+	    (std::size_t)setup.rowptr[(std::size_t)local_row] < setup.colind.size();
+	  if (have_entry_in_current_row && setup.colind.back() == entry.col)
 	  {
 	    setup.nzval.back().r += entry.val.r;
 	    setup.nzval.back().i += entry.val.i;
@@ -4792,6 +4841,7 @@ namespace Chroma
 	  throw std::runtime_error("getSuperLUSolver: tensor-transposed operators are unsupported");
 
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
+	const SuperLUOptionOverrides superlu_options = getSuperLUOptionOverrides(ops);
 	Tracker _t(std::string("setup SuperLU_DIST solver ") + prefix);
 
 	const bool local_superlu =
@@ -5011,7 +5061,7 @@ namespace Chroma
 
 	    superlu_dist_options_t options;
 	    set_default_options_dist(&options);
-	    options.IterRefine = NOREFINE;
+	    applySuperLUOptionOverrides(superlu_options, options);
 
 	    struct SolveScope {
 	      std::string prefix;

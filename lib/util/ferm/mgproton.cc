@@ -14,11 +14,15 @@
 #  include "util/ferm/chroma_superlu_dist_wrapper.h"
 #endif
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <set>
+#include <sstream>
 
 #ifdef BUILD_SB
 namespace Chroma
@@ -4261,10 +4265,36 @@ namespace Chroma
 	return (int)n;
       }
 
+      inline bool parseSuperLUEnvFlag(const char* env, bool default_value)
+      {
+	if (!env)
+	  return default_value;
+	if (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0 ||
+	    std::strcmp(env, "FALSE") == 0 || std::strcmp(env, "no") == 0 ||
+	    std::strcmp(env, "NO") == 0 || std::strcmp(env, "off") == 0 ||
+	    std::strcmp(env, "OFF") == 0)
+	  return false;
+	if (std::strcmp(env, "1") == 0 || std::strcmp(env, "true") == 0 ||
+	    std::strcmp(env, "TRUE") == 0 || std::strcmp(env, "yes") == 0 ||
+	    std::strcmp(env, "YES") == 0 || std::strcmp(env, "on") == 0 ||
+	    std::strcmp(env, "ON") == 0)
+	  return true;
+	return std::atoi(env) != 0;
+      }
+
+      inline bool getSuperLUPrintStatDefault()
+      {
+	const char* env = std::getenv("SB_SUPERLU_PRINTSTAT");
+	if (!env)
+	  env = std::getenv("SB_SUPERLU_PRINT_STAT");
+	return parseSuperLUEnvFlag(env, false);
+      }
+
       struct SuperLUOptionOverrides {
 	bool has_ilu_level = false;
 	int ilu_level = SLU_EMPTY;
 	IterRefine_t iter_refine = NOREFINE;
+	bool print_stat = false;
       };
 
       inline const std::map<std::string, IterRefine_t>& getSuperLUIterRefineMap()
@@ -4281,6 +4311,7 @@ namespace Chroma
 	SuperLUOptionOverrides out;
 	out.iter_refine =
 	  getOption<IterRefine_t>(ops, "iter_refine", getSuperLUIterRefineMap(), NOREFINE);
+	out.print_stat = getSuperLUPrintStatDefault();
 
 	auto ilu_level = ops.getValueMaybe("ilu_level");
 	auto ILU_level = ops.getValueMaybe("ILU_level");
@@ -4295,6 +4326,19 @@ namespace Chroma
 	    ops.getValue(path).throw_error("SuperLU_DIST only supports ILU_level=0");
 	}
 
+	auto print_stat = ops.getValueMaybe("print_stat");
+	auto print_stats = ops.getValueMaybe("print_stats");
+	auto PrintStat = ops.getValueMaybe("PrintStat");
+	if ((print_stat ? 1 : 0) + (print_stats ? 1 : 0) + (PrintStat ? 1 : 0) > 1)
+	  ops.getValue("type").throw_error(
+	    "set only one of `print_stat', `print_stats', and `PrintStat'");
+	if (print_stat || print_stats || PrintStat)
+	{
+	  const std::string path =
+	    print_stat ? "print_stat" : (print_stats ? "print_stats" : "PrintStat");
+	  out.print_stat = getOption<bool>(ops, path);
+	}
+
 	return out;
       }
 
@@ -4302,8 +4346,165 @@ namespace Chroma
 					      superlu_dist_options_t& options)
       {
 	options.IterRefine = overrides.iter_refine;
+	options.PrintStat = overrides.print_stat ? YES : NO;
 	if (overrides.has_ilu_level)
 	  options.ILU_level = overrides.ilu_level;
+      }
+
+      inline int getSuperLUTimingLevel()
+      {
+	static int level = []() {
+	  const char* env = std::getenv("SB_SUPERLU_TIMING");
+	  if (!env)
+	    env = std::getenv("CHROMA_SUPERLU_TIMING");
+	  if (!env)
+	    return 0;
+	  if (std::strcmp(env, "true") == 0 || std::strcmp(env, "TRUE") == 0 ||
+	      std::strcmp(env, "yes") == 0 || std::strcmp(env, "YES") == 0 ||
+	      std::strcmp(env, "on") == 0 || std::strcmp(env, "ON") == 0)
+	    return 1;
+	  return std::max(0, std::atoi(env));
+	}();
+	return level;
+      }
+
+      inline double superLUNow()
+      {
+	return detail::w_time();
+      }
+
+      struct SuperLUTimer {
+	double start = superLUNow();
+	double last = start;
+
+	double mark()
+	{
+	  const double now = superLUNow();
+	  const double elapsed = now - last;
+	  last = now;
+	  return elapsed;
+	}
+
+	double total() const
+	{
+	  return superLUNow() - start;
+	}
+      };
+
+      struct SuperLUPhaseTiming {
+	const char* name = nullptr;
+	int phase = 0;
+      };
+
+      inline void appendTimingField(std::ostringstream& out, const char* name, double value)
+      {
+	out << ' ' << name << '=' << std::fixed << std::setprecision(4) << value << 's';
+      }
+
+      inline void reportSuperLUTiming(const std::string& prefix, MPI_Comm comm, bool local_superlu,
+				      int timing_level, std::size_t nrhs, int_t n, int_t m_loc,
+				      int_t nnz_loc, const std::vector<double>& chroma_times,
+				      const SuperLUStat_t& stat)
+      {
+	if (timing_level <= 0)
+	  return;
+
+	static const char* chroma_names[] = {"total",
+					     "prepare_tensors",
+					     "pack_rhs",
+					     "rhs_exchange",
+					     "assemble_rhs",
+					     "superlu_setup",
+					     "pzgssvx3d",
+					     "pack_solution",
+					     "solution_exchange",
+					     "scatter_solution",
+					     "copy_output"};
+	const int chroma_count =
+	  std::min<int>((int)chroma_times.size(), (int)(sizeof(chroma_names) / sizeof(char*)));
+	std::vector<double> chroma_max((std::size_t)chroma_count, 0.0);
+	std::vector<double> chroma_sum((std::size_t)chroma_count, 0.0);
+	MPI_Reduce(chroma_times.data(), chroma_max.data(), chroma_count, MPI_DOUBLE, MPI_MAX, 0,
+		   comm);
+	MPI_Reduce(chroma_times.data(), chroma_sum.data(), chroma_count, MPI_DOUBLE, MPI_SUM, 0,
+		   comm);
+
+	static const SuperLUPhaseTiming phases[] = {
+	  {"COLPERM", COLPERM},	  {"ROWPERM", ROWPERM},	  {"EQUIL", EQUIL},
+	  {"SYMBFAC", SYMBFAC},	  {"DIST", DIST},	  {"FACT", FACT},
+	  {"COMM", COMM},	  {"SOLVE", SOLVE},	  {"REFINE", REFINE},
+	  {"SOL_COMM", SOL_COMM}, {"SOL_GEMM", SOL_GEMM}, {"SOL_TRSM", SOL_TRSM},
+	  {"SOL_TOT", SOL_TOT}};
+	const int phase_count = (int)(sizeof(phases) / sizeof(SuperLUPhaseTiming));
+	std::vector<double> phase_local((std::size_t)phase_count, 0.0);
+	for (int i = 0; i < phase_count; ++i)
+	  phase_local[(std::size_t)i] = stat.utime[phases[i].phase];
+	std::vector<double> phase_max((std::size_t)phase_count, 0.0);
+	std::vector<double> phase_sum((std::size_t)phase_count, 0.0);
+	MPI_Reduce(phase_local.data(), phase_max.data(), phase_count, MPI_DOUBLE, MPI_MAX, 0, comm);
+	MPI_Reduce(phase_local.data(), phase_sum.data(), phase_count, MPI_DOUBLE, MPI_SUM, 0, comm);
+
+	double dims_local[] = {(double)n, (double)m_loc, (double)nnz_loc};
+	double dims_max[] = {0.0, 0.0, 0.0};
+	MPI_Reduce(dims_local, dims_max, 3, MPI_DOUBLE, MPI_MAX, 0, comm);
+
+	int comm_rank = 0;
+	int comm_size = 1;
+	MPI_Comm_rank(comm, &comm_rank);
+	MPI_Comm_size(comm, &comm_size);
+	if (comm_rank != 0 || (local_superlu && Layout::nodeNumber() != 0))
+	  return;
+
+	std::ostringstream summary;
+	summary << prefix << " SuperLU_DIST timing nrhs=" << nrhs << " n=" << (long long)dims_max[0]
+		<< " max_m_loc=" << (long long)dims_max[1]
+		<< " max_nnz_loc=" << (long long)dims_max[2] << " ranks=" << comm_size << " max:";
+	for (int i = 0; i < chroma_count; ++i)
+	  appendTimingField(summary, chroma_names[i], chroma_max[(std::size_t)i]);
+	QDPIO::cout << summary.str() << std::endl;
+
+	if (timing_level > 1 && comm_size > 1)
+	{
+	  std::ostringstream avg;
+	  avg << prefix << " SuperLU_DIST timing avg:";
+	  for (int i = 0; i < chroma_count; ++i)
+	    appendTimingField(avg, chroma_names[i],
+			      chroma_sum.empty() ? 0.0
+						 : chroma_sum[(std::size_t)i] / (double)comm_size);
+	  QDPIO::cout << avg.str() << std::endl;
+	}
+
+	std::vector<int> order((std::size_t)phase_count);
+	std::iota(order.begin(), order.end(), 0);
+	std::sort(order.begin(), order.end(), [&](int a, int b) {
+	  return phase_max[(std::size_t)a] > phase_max[(std::size_t)b];
+	});
+
+	std::ostringstream phase_summary;
+	phase_summary << prefix << " SuperLU_DIST pzgssvx3d phase max:";
+	int printed = 0;
+	const int max_print = timing_level > 1 ? phase_count : 8;
+	for (int idx : order)
+	{
+	  const double value = phase_max[(std::size_t)idx];
+	  if (value <= 0.0 && timing_level <= 1)
+	    continue;
+	  appendTimingField(phase_summary, phases[idx].name, value);
+	  if (++printed >= max_print)
+	    break;
+	}
+	phase_summary << " tiny_pivots=" << stat.TinyPivots << " refine_steps=" << stat.RefineSteps;
+	QDPIO::cout << phase_summary.str() << std::endl;
+
+	if (timing_level > 1 && comm_size > 1)
+	{
+	  std::ostringstream phase_avg;
+	  phase_avg << prefix << " SuperLU_DIST pzgssvx3d phase avg:";
+	  for (int idx : order)
+	    appendTimingField(phase_avg, phases[idx].name,
+			      phase_sum[(std::size_t)idx] / (double)comm_size);
+	  QDPIO::cout << phase_avg.str() << std::endl;
+	}
       }
 
       inline std::vector<int> getDispls(const std::vector<int>& counts)
@@ -4842,6 +5043,8 @@ namespace Chroma
 
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
 	const SuperLUOptionOverrides superlu_options = getSuperLUOptionOverrides(ops);
+	const int superlu_timing_level =
+	  std::max(getSuperLUTimingLevel(), getOption<bool>(ops, "timing", false) ? 1 : 0);
 	Tracker _t(std::string("setup SuperLU_DIST solver ") + prefix);
 
 	const bool local_superlu =
@@ -4918,6 +5121,8 @@ namespace Chroma
 	// scatters the solution back to the Chroma tensor layout.
 	return Operator<NOp, ComplexD>{
 	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
+	    SuperLUTimer timing;
+	    auto mark_timing = [&]() { return superlu_timing_level > 0 ? timing.mark() : 0.0; };
 	    const std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
 	    const std::size_t nrhs = x.volume(order_cols);
 	    if (nrhs == 0)
@@ -5014,6 +5219,7 @@ namespace Chroma
 	      for (unsigned int p = 0; p < NOp; ++p)
 		y_row_off[row_idx] +=
 		  (std::size_t)local_blocks.dom_row_local_coors[row_idx][p] * y_strides[p];
+	    const double t_prepare_tensors = mark_timing();
 
 	    // SuperLU expects each rank to own a contiguous global row slab, so the RHS must be
 	    // redistributed from Chroma's native layout before the solve and sent back afterwards.
@@ -5034,6 +5240,7 @@ namespace Chroma
 		    std::to_string(x_local.volume()) + ", x_local_localVolume=" +
 		    std::to_string(x_local.localVolume()) + ", nrhs=" + std::to_string(nrhs))]));
 	    }
+	    const double t_pack_rhs = mark_timing();
 
 	    auto scale_counts = [&](const std::vector<int>& counts, const std::string& what) {
 	      std::vector<int> out(counts.size(), 0);
@@ -5046,6 +5253,7 @@ namespace Chroma
 	    auto recv_rhs =
 	      alltoallvPod(send_rhs, scale_counts(setup->send_row_counts, "rhs values"),
 			   recv_rhs_counts, "rhs values", superlu_comm);
+	    const double t_rhs_exchange = mark_timing();
 	    (void)recv_rhs_counts;
 	    if (recv_rhs.size() != setup->recv_local_rows.size() * nrhs)
 	      throw std::runtime_error("SuperLU_DIST: received RHS value count mismatch");
@@ -5058,6 +5266,7 @@ namespace Chroma
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
 		b[(std::size_t)local_row + rhs * (std::size_t)ldb] = recv_rhs[i * nrhs + rhs];
 	    }
+	    const double t_assemble_rhs = mark_timing();
 
 	    superlu_dist_options_t options;
 	    set_default_options_dist(&options);
@@ -5135,12 +5344,14 @@ namespace Chroma
 	    scope.lu_init = true;
 	    PStatInit(&scope.stat);
 	    scope.stat_init = true;
+	    const double t_superlu_setup = mark_timing();
 
 	    std::vector<double> berr(std::max<std::size_t>(nrhs, 1), 0.0);
 	    int info = 0;
 	    pzgssvx3d(&options, &scope.A, &scope.ScalePermstruct, b.data(), ldb,
 		      checkedSuperLUCount(nrhs, "nrhs"), &scope.grid, &scope.LUstruct,
 		      &scope.SOLVEstruct, berr.data(), &scope.stat, &info);
+	    const double t_pzgssvx3d = mark_timing();
 	    scope.solve_init = true;
 	    scope.a3d_init = scope.SOLVEstruct.A3d != nullptr;
 	    if (info != 0)
@@ -5155,11 +5366,13 @@ namespace Chroma
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
 		send_sol.push_back(b[(std::size_t)local_row + rhs * (std::size_t)ldb]);
 	    }
+	    const double t_pack_solution = mark_timing();
 
 	    std::vector<int> recv_sol_counts;
 	    auto recv_sol =
 	      alltoallvPod(send_sol, scale_counts(setup->recv_sol_counts, "solution values"),
 			   recv_sol_counts, "solution values", superlu_comm);
+	    const double t_solution_exchange = mark_timing();
 	    (void)recv_sol_counts;
 	    if (recv_sol.size() != setup->send_sol_rows.size() * nrhs)
 	      throw std::runtime_error("SuperLU_DIST: received solution value count mismatch");
@@ -5174,8 +5387,27 @@ namespace Chroma
 		yptr[checked_offset(base, y_rhs_off[rhs], y_local.volume(), "solution")] =
 		  fromSuperLUComplex(recv_sol[i * nrhs + rhs]);
 	    }
+	    const double t_scatter_solution = mark_timing();
 
 	    yh.copyTo(y_sparse);
+	    const double t_copy_output = mark_timing();
+	    if (superlu_timing_level > 0)
+	    {
+	      std::vector<double> chroma_times;
+	      chroma_times.push_back(timing.total());
+	      chroma_times.push_back(t_prepare_tensors);
+	      chroma_times.push_back(t_pack_rhs);
+	      chroma_times.push_back(t_rhs_exchange);
+	      chroma_times.push_back(t_assemble_rhs);
+	      chroma_times.push_back(t_superlu_setup);
+	      chroma_times.push_back(t_pzgssvx3d);
+	      chroma_times.push_back(t_pack_solution);
+	      chroma_times.push_back(t_solution_exchange);
+	      chroma_times.push_back(t_scatter_solution);
+	      chroma_times.push_back(t_copy_output);
+	      reportSuperLUTiming(prefix, superlu_comm, local_superlu, superlu_timing_level, nrhs,
+				  setup->n, setup->m_loc, setup->nnz_loc, chroma_times, scope.stat);
+	    }
 	  },
 	  op.i,
 	  op.d,

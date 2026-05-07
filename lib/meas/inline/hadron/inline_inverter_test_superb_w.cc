@@ -4,22 +4,21 @@
  * Propagator calculation in distillation
  */
 
-#include "qdp.h"
-#include "fermact.h"
 #include "meas/inline/hadron/inline_inverter_test_superb_w.h"
-#include "meas/inline/abs_inline_measurement_factory.h"
-#include "meas/glue/mesplq.h"
-#include "util/ferm/transf.h"
-#include "util/ferm/spin_rep.h"
-#include "util/ferm/diractodr.h"
-#include "util/info/proginfo.h"
-#include "util/info/proginfo.h"
 #include "actions/ferm/fermacts/fermact_factory_w.h"
 #include "actions/ferm/fermacts/fermacts_aggregate_w.h"
+#include "fermact.h"
+#include "meas/glue/mesplq.h"
+#include "meas/inline/abs_inline_measurement_factory.h"
 #include "meas/inline/make_xml_file.h"
+#include "qdp.h"
+#include "util/ferm/diractodr.h"
+#include "util/ferm/spin_rep.h"
+#include "util/ferm/transf.h"
+#include "util/info/proginfo.h"
 
-#include "util/ferm/superb_contractions.h"
 #include "util/ferm/mgproton.h"
+#include "util/ferm/superb_contractions.h"
 
 #include "meas/inline/io/named_objmap.h"
 
@@ -27,10 +26,10 @@
 
 #ifdef BUILD_SB
 
-namespace Chroma 
-{ 
+namespace Chroma
+{
   //----------------------------------------------------------------------------
-  namespace InlineInverterTestSuperbEnv 
+  namespace InlineInverterTestSuperbEnv
   {
     //! Propagator input
     void read(XMLReader& xml, const std::string& path, Params::NamedObject_t& input)
@@ -50,7 +49,6 @@ namespace Chroma
       pop(xml);
     }
 
-
     //! Propagator input
     void read(XMLReader& xml, const std::string& path, Params::Param_t::Contract_t& input)
     {
@@ -59,11 +57,23 @@ namespace Chroma
       read(inputtop, "num_vecs", input.num_vecs);
       read(inputtop, "decay_dir", input.decay_dir);
 
-      if( inputtop.count("max_rhs") == 1 ) {
-        read(inputtop, "max_rhs", input.max_rhs);
-      } else {
+      if (inputtop.count("max_rhs") == 1)
+      {
+	read(inputtop, "max_rhs", input.max_rhs);
+      }
+      else
+      {
 	input.max_rhs.resize(1);
 	input.max_rhs[0] = 8;
+      }
+
+      if (inputtop.count("dump_rhs") == 1)
+      {
+	read(inputtop, "dump_rhs", input.dump_rhs);
+      }
+      else
+      {
+	input.dump_rhs = false;
       }
     }
 
@@ -75,10 +85,10 @@ namespace Chroma
       write(xml, "num_vecs", input.num_vecs);
       write(xml, "decay_dir", input.decay_dir);
       write(xml, "max_rhs", input.max_rhs);
+      write(xml, "dump_rhs", input.dump_rhs);
 
       pop(xml);
     }
-
 
     //! Propagator input
     void read(XMLReader& xml, const std::string& path, Params::Param_t& input)
@@ -100,7 +110,6 @@ namespace Chroma
       pop(xml);
     }
 
-
     //! Propagator input
     void read(XMLReader& xml, const std::string& path, Params& input)
     {
@@ -112,22 +121,20 @@ namespace Chroma
     void write(XMLWriter& xml, const std::string& path, const Params& input)
     {
       push(xml, path);
-    
+
       write(xml, "Param", input.param);
       write(xml, "NamedObject", input.named_obj);
 
       pop(xml);
     }
-  } // namespace InlinePropDistillationSuperbEnv 
-
+  } // namespace InlinePropDistillationSuperbEnv
 
   //----------------------------------------------------------------------------
-  namespace InlineInverterTestSuperbEnv 
+  namespace InlineInverterTestSuperbEnv
   {
     namespace
     {
-      AbsInlineMeasurement* createMeasurement(XMLReader& xml_in, 
-					      const std::string& path) 
+      AbsInlineMeasurement* createMeasurement(XMLReader& xml_in, const std::string& path)
       {
 	return new InlineMeas(Params(xml_in, path));
       }
@@ -135,14 +142,14 @@ namespace Chroma
       //! Local registration flag
       bool registered = false;
     }
-      
+
     const std::string name = "INVERTER_TEST_SUPERB";
 
     //! Register all the factories
-    bool registerAll() 
+    bool registerAll()
     {
-      bool success = true; 
-      if (! registered)
+      bool success = true;
+      if (!registered)
       {
 	success &= WilsonTypeFermActsEnv::registerAll();
 	success &= TheInlineMeasurementFactory::Instance().registerObject(name, createMeasurement);
@@ -151,14 +158,16 @@ namespace Chroma
       return success;
     }
 
-
     //----------------------------------------------------------------------------
     // Param stuff
-    Params::Params() { frequency = 0; }
-
-    Params::Params(XMLReader& xml_in, const std::string& path) 
+    Params::Params()
     {
-      try 
+      frequency = 0;
+    }
+
+    Params::Params(XMLReader& xml_in, const std::string& path)
+    {
+      try
       {
 	XMLReader paramtop(xml_in, path);
 
@@ -174,25 +183,21 @@ namespace Chroma
 	read(paramtop, "NamedObject", named_obj);
 
 	// Possible alternate XML file pattern
-	if (paramtop.count("xml_file") != 0) 
+	if (paramtop.count("xml_file") != 0)
 	{
 	  read(paramtop, "xml_file", xml_file);
 	}
-      }
-      catch(const std::string& e) 
+      } catch (const std::string& e)
       {
 	QDPIO::cerr << __func__ << ": Caught Exception reading XML: " << e << std::endl;
 	QDP_abort(1);
       }
     }
 
-
     //----------------------------------------------------------------------------
     //----------------------------------------------------------------------------
     // Function call
-    void 
-    InlineMeas::operator()(unsigned long update_no,
-			   XMLWriter& xml_out) 
+    void InlineMeas::operator()(unsigned long update_no, XMLWriter& xml_out)
     {
       // If xml file not empty, then use alternate
       if (params.xml_file != "")
@@ -213,11 +218,8 @@ namespace Chroma
       }
     }
 
-
     // Real work done here
-    void 
-    InlineMeas::func(unsigned long update_no,
-		     XMLWriter& xml_out) 
+    void InlineMeas::func(unsigned long update_no, XMLWriter& xml_out)
     {
       START_CODE();
 
@@ -230,15 +232,14 @@ namespace Chroma
       XMLBufferWriter gauge_xml;
       try
       {
-	u = TheNamedObjMap::Instance().getData< multi1d<LatticeColorMatrix> >(params.named_obj.gauge_id);
+	u = TheNamedObjMap::Instance().getData<multi1d<LatticeColorMatrix>>(
+	  params.named_obj.gauge_id);
 	TheNamedObjMap::Instance().get(params.named_obj.gauge_id).getRecordXML(gauge_xml);
-      }
-      catch( std::bad_cast ) 
+      } catch (std::bad_cast)
       {
 	QDPIO::cerr << name << ": caught dynamic cast error" << std::endl;
 	QDP_abort(1);
-      }
-      catch (const std::string& e) 
+      } catch (const std::string& e)
       {
 	QDPIO::cerr << name << ": std::map call failed: " << e << std::endl;
 	QDP_abort(1);
@@ -249,7 +250,7 @@ namespace Chroma
 
       QDPIO::cout << name << ": propagator calculation" << std::endl;
 
-      proginfo(xml_out);    // Print out basic program info
+      proginfo(xml_out); // Print out basic program info
 
       // Write out the input
       write(xml_out, "Input", params);
@@ -266,12 +267,12 @@ namespace Chroma
 
       // Will use TimeSliceSet-s a lot
       const int decay_dir = params.param.contract.decay_dir;
-      const int Lt        = Layout::lattSize()[decay_dir];
+      const int Lt = Layout::lattSize()[decay_dir];
 
       // A sanity check
-      if (decay_dir != Nd-1)
+      if (decay_dir != Nd - 1)
       {
-	QDPIO::cerr << name << ": TimeSliceIO only supports decay_dir= " << Nd-1 << "\n";
+	QDPIO::cerr << name << ": TimeSliceIO only supports decay_dir= " << Nd - 1 << "\n";
 	QDP_abort(1);
       }
 
@@ -289,7 +290,7 @@ namespace Chroma
 
 	swatch.start();
 
-	const int num_vecs            = params.param.contract.num_vecs;
+	const int num_vecs = params.param.contract.num_vecs;
 	for (int rhsi = 0; rhsi < params.param.contract.max_rhs.size(); ++rhsi)
 	{
 	  const int max_rhs = params.param.contract.max_rhs[rhsi];
@@ -306,6 +307,24 @@ namespace Chroma
 	    SB::Tensor<Nd + 3, SB::Complex> colorvec(
 	      order, SB::latticeSize<Nd + 3>(order, {{'n', colorvec_src_step}, {'t', 1}}));
 	    SB::nrand(colorvec);
+
+	    if (params.param.contract.dump_rhs)
+	    {
+	      const std::string rhs_order = "csxyztXn";
+	      SB::Tensor<Nd + 4, SB::Complex> rhs(
+		rhs_order, SB::latticeSize<Nd + 4>(rhs_order, {{'n', colorvec_src_step}}),
+		colorvec.getDev());
+	      rhs.set_zero();
+	      colorvec.copyTo(
+		rhs.kvslice_from_size({{'t', t_source}, {'s', spin_source}}, {{'t', 1}, {'s', 1}}));
+	      QDPIO::cout << "% rhs_order=" << rhs_order << " rhsi=" << rhsi
+			  << " src0=" << colorvec_src0 << " n=" << colorvec_src_step
+			  << " t_source=" << t_source << " spin_source=" << spin_source
+			  << std::endl;
+	      QDPIO::cout.flush();
+	      rhs.print(std::string("b_rhsi") + std::to_string(rhsi) + "_src" +
+			std::to_string(colorvec_src0));
+	    }
 
 	    StopWatch snarss1;
 	    snarss1.reset();
@@ -324,22 +343,18 @@ namespace Chroma
 	}   // rhsi
 
 	swatch.stop();
-	QDPIO::cout << "Propagators computed: time= " 
-		    << swatch.getTimeInSeconds() 
-		    << " secs" << std::endl;
-      }
-      catch (const std::string& e) 
+	QDPIO::cout << "Propagators computed: time= " << swatch.getTimeInSeconds() << " secs"
+		    << std::endl;
+      } catch (const std::string& e)
       {
 	QDPIO::cout << name << ": caught exception around qprop: " << e << std::endl;
 	QDP_abort(1);
       }
 
-      pop(xml_out);  // prop_dist
+      pop(xml_out); // prop_dist
 
       snoop.stop();
-      QDPIO::cout << name << ": total time = "
-		  << snoop.getTimeInSeconds() 
-		  << " secs" << std::endl;
+      QDPIO::cout << name << ": total time = " << snoop.getTimeInSeconds() << " secs" << std::endl;
 
       QDPIO::cout << name << ": ran successfully" << std::endl;
 

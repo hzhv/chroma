@@ -4396,6 +4396,18 @@ namespace Chroma
 	int phase = 0;
       };
 
+      inline const char* superLUFactName(fact_t fact)
+      {
+	switch (fact)
+	{
+	case DOFACT: return "DOFACT";
+	case SamePattern: return "SamePattern";
+	case SamePattern_SameRowPerm: return "SamePattern_SameRowPerm";
+	case FACTORED: return "FACTORED";
+	default: return "unknown";
+	}
+      }
+
       inline void appendTimingField(std::ostringstream& out, const char* name, double value)
       {
 	out << ' ' << name << '=' << std::fixed << std::setprecision(4) << value << 's';
@@ -4404,7 +4416,9 @@ namespace Chroma
       inline void reportSuperLUTiming(const std::string& prefix, MPI_Comm comm, bool local_superlu,
 				      int timing_level, std::size_t nrhs, int_t n, int_t m_loc,
 				      int_t nnz_loc, const std::vector<double>& chroma_times,
-				      const SuperLUStat_t& stat)
+				      const SuperLUStat_t& stat, std::size_t solve_call,
+				      fact_t solve_fact, const void* lu_struct,
+				      const void* llu_struct)
       {
 	if (timing_level <= 0)
 	  return;
@@ -4456,7 +4470,9 @@ namespace Chroma
 	  return;
 
 	std::ostringstream summary;
-	summary << prefix << " SuperLU_DIST timing nrhs=" << nrhs << " n=" << (long long)dims_max[0]
+	summary << prefix << " SuperLU_DIST timing solve=" << solve_call
+		<< " fact=" << superLUFactName(solve_fact) << " LUstruct=" << lu_struct
+		<< " Llu=" << llu_struct << " nrhs=" << nrhs << " n=" << (long long)dims_max[0]
 		<< " max_m_loc=" << (long long)dims_max[1]
 		<< " max_nnz_loc=" << (long long)dims_max[2] << " ranks=" << comm_size << " max:";
 	for (int i = 0; i < chroma_count; ++i)
@@ -4506,6 +4522,26 @@ namespace Chroma
 	  QDPIO::cout << phase_avg.str() << std::endl;
 	}
       }
+
+      struct SuperLUStatScope {
+	SuperLUStat_t stat{};
+	bool init = false;
+
+	SuperLUStatScope()
+	{
+	  PStatInit(&stat);
+	  init = true;
+	}
+
+	~SuperLUStatScope()
+	{
+	  if (init)
+	    PStatFree(&stat);
+	}
+
+	SuperLUStatScope(const SuperLUStatScope&) = delete;
+	SuperLUStatScope& operator=(const SuperLUStatScope&) = delete;
+      };
 
       inline std::vector<int> getDispls(const std::vector<int>& counts)
       {
@@ -4624,6 +4660,121 @@ namespace Chroma
 	std::vector<int> send_sol_displs;
 	std::vector<int> recv_sol_counts;
 	std::vector<int> recv_sol_displs;
+      };
+
+      template <std::size_t NOp>
+      struct SuperLUSolverState {
+	std::string prefix;
+	MPI_Comm comm = MPI_COMM_NULL;
+	int nprow = 1;
+	int npcol = 1;
+	int npdep = 1;
+	SuperLUOptionOverrides overrides;
+	superlu_dist_options_t options{};
+	fact_t first_fact = DOFACT;
+	SuperMatrix A{};
+	gridinfo3d_t grid{};
+	zScalePermstruct_t ScalePermstruct{};
+	zLUstruct_t LUstruct{};
+	zSOLVEstruct_t SOLVEstruct{};
+	int_t n = 0;
+	bool grid_init = false;
+	bool matrix_init = false;
+	bool scaleperm_init = false;
+	bool lu_init = false;
+	bool solve_init = false;
+	bool a3d_init = false;
+	bool initialized = false;
+	bool factorized = false;
+	std::size_t solve_calls = 0;
+
+	SuperLUSolverState(const std::string& prefix_, MPI_Comm comm_, int nprow_, int npcol_,
+			   int npdep_, const SuperLUOptionOverrides& overrides_)
+	  : prefix(prefix_),
+	    comm(comm_),
+	    nprow(nprow_),
+	    npcol(npcol_),
+	    npdep(npdep_),
+	    overrides(overrides_)
+	{
+	  set_default_options_dist(&options);
+	  applySuperLUOptionOverrides(overrides, options);
+	  first_fact = options.Fact;
+	}
+
+	~SuperLUSolverState()
+	{
+	  if (solve_init)
+	    zSolveFinalize(&options, &SOLVEstruct);
+	  if (lu_init)
+	    zDestroy_LU(n, &grid.grid2d, &LUstruct);
+	  if (a3d_init)
+	    zDestroy_A3d_gathered_on_2d(&SOLVEstruct, &grid);
+	  if (matrix_init)
+	    Destroy_CompRowLoc_Matrix_dist(&A);
+	  if (scaleperm_init)
+	    zScalePermstructFree(&ScalePermstruct);
+	  if (lu_init)
+	    zLUstructFree(&LUstruct);
+	  if (grid_init)
+	  {
+	    detail::log(1, prefix + " calling superlu_gridexit3d");
+	    superlu_gridexit3d(&grid);
+	  }
+	}
+
+	SuperLUSolverState(const SuperLUSolverState&) = delete;
+	SuperLUSolverState& operator=(const SuperLUSolverState&) = delete;
+
+	void initialize(const SuperLUMatrixSetup<NOp>& setup)
+	{
+	  if (initialized)
+	    return;
+
+	  n = setup.n;
+	  superlu_gridinit3d(comm, nprow, npcol, npdep, &grid);
+	  grid_init = true;
+
+	  int_t* rowptr = intMalloc_dist(setup.m_loc + 1);
+	  int_t* colind = setup.nnz_loc == 0 ? nullptr : intMalloc_dist(setup.nnz_loc);
+	  doublecomplex* nzval =
+	    setup.nnz_loc == 0 ? nullptr : doublecomplexMalloc_dist(setup.nnz_loc);
+	  std::copy(setup.rowptr.begin(), setup.rowptr.end(), rowptr);
+	  if (setup.nnz_loc > 0)
+	  {
+	    std::copy(setup.colind.begin(), setup.colind.end(), colind);
+	    std::copy(setup.nzval.begin(), setup.nzval.end(), nzval);
+	  }
+
+	  zCreate_CompRowLoc_Matrix_dist(&A, setup.m, setup.n, setup.nnz_loc, setup.m_loc,
+					 setup.fst_row, nzval, colind, rowptr, SLU_NR_loc, SLU_Z,
+					 SLU_GE);
+	  matrix_init = true;
+
+	  zScalePermstructInit(setup.m, setup.n, &ScalePermstruct);
+	  scaleperm_init = true;
+	  zLUstructInit(setup.n, &LUstruct);
+	  lu_init = true;
+	  initialized = true;
+	}
+
+	fact_t prepareSolve()
+	{
+	  options.Fact = factorized ? FACTORED : first_fact;
+	  return options.Fact;
+	}
+
+	void noteSolveReturned()
+	{
+	  solve_init = true;
+	  a3d_init = SOLVEstruct.A3d != nullptr;
+	}
+
+	std::size_t markFactorized()
+	{
+	  factorized = true;
+	  return ++solve_calls;
+	}
       };
 
       template <std::size_t NOp>
@@ -5115,10 +5266,12 @@ namespace Chroma
 	auto setup = std::make_shared<SuperLUMatrixSetup<NOp>>(
 	  local_superlu ? buildLocalSuperLUMatrixSetup(local_blocks, op.i, op.d, prefix)
 			: buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm));
+	auto superlu_state = std::make_shared<SuperLUSolverState<NOp>>(
+	  prefix, superlu_comm, nprow, npcol, npdep, superlu_options);
 
 	// Keep the explicit sparse conversion and the redistribution schedules in shared setup
-	// objects. Each solve call only packs the current RHS batch, calls SuperLU once, and
-	// scatters the solution back to the Chroma tensor layout.
+	// objects. SuperLU's factor storage also lives with the solver, so repeated applications
+	// reuse the first LU factorization and only solve new right-hand sides.
 	return Operator<NOp, ComplexD>{
 	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
 	    SuperLUTimer timing;
@@ -5268,95 +5421,23 @@ namespace Chroma
 	    }
 	    const double t_assemble_rhs = mark_timing();
 
-	    superlu_dist_options_t options;
-	    set_default_options_dist(&options);
-	    applySuperLUOptionOverrides(superlu_options, options);
-
-	    struct SolveScope {
-	      std::string prefix;
-	      superlu_dist_options_t* options = nullptr;
-	      SuperMatrix A{};
-	      gridinfo3d_t grid{};
-	      zScalePermstruct_t ScalePermstruct{};
-	      zLUstruct_t LUstruct{};
-	      zSOLVEstruct_t SOLVEstruct{};
-	      SuperLUStat_t stat{};
-	      int_t n = 0;
-	      bool grid_init = false;
-	      bool matrix_init = false;
-	      bool scaleperm_init = false;
-	      bool lu_init = false;
-	      bool stat_init = false;
-	      bool solve_init = false;
-	      bool a3d_init = false;
-
-	      ~SolveScope()
-	      {
-		if (matrix_init)
-		  Destroy_CompRowLoc_Matrix_dist(&A);
-		if (solve_init)
-		  zSolveFinalize(options, &SOLVEstruct);
-		if (lu_init)
-		  zDestroy_LU(n, &grid.grid2d, &LUstruct);
-		if (a3d_init)
-		  zDestroy_A3d_gathered_on_2d(&SOLVEstruct, &grid);
-		if (scaleperm_init)
-		  zScalePermstructFree(&ScalePermstruct);
-		if (lu_init)
-		  zLUstructFree(&LUstruct);
-		if (stat_init)
-		  PStatFree(&stat);
-		if (grid_init)
-		{
-		  // Keep grid teardown at the top solve scope so this runs exactly once per
-		  // SuperLU solve invocation, never once per RHS.
-		  detail::log(1, prefix + " calling superlu_gridexit3d");
-		  superlu_gridexit3d(&grid);
-		}
-	      }
-	    } scope;
-	    scope.prefix = prefix;
-	    scope.options = &options;
-	    scope.n = setup->n;
-
-	    superlu_gridinit3d(superlu_comm, nprow, npcol, npdep, &scope.grid);
-	    scope.grid_init = true;
-
-	    int_t* rowptr = intMalloc_dist(setup->m_loc + 1);
-	    int_t* colind = setup->nnz_loc == 0 ? nullptr : intMalloc_dist(setup->nnz_loc);
-	    doublecomplex* nzval =
-	      setup->nnz_loc == 0 ? nullptr : doublecomplexMalloc_dist(setup->nnz_loc);
-	    std::copy(setup->rowptr.begin(), setup->rowptr.end(), rowptr);
-	    if (setup->nnz_loc > 0)
-	    {
-	      std::copy(setup->colind.begin(), setup->colind.end(), colind);
-	      std::copy(setup->nzval.begin(), setup->nzval.end(), nzval);
-	    }
-
-	    zCreate_CompRowLoc_Matrix_dist(&scope.A, setup->m, setup->n, setup->nnz_loc,
-					   setup->m_loc, setup->fst_row, nzval, colind, rowptr,
-					   SLU_NR_loc, SLU_Z, SLU_GE);
-	    scope.matrix_init = true;
-
-	    zScalePermstructInit(setup->m, setup->n, &scope.ScalePermstruct);
-	    scope.scaleperm_init = true;
-	    zLUstructInit(setup->n, &scope.LUstruct);
-	    scope.lu_init = true;
-	    PStatInit(&scope.stat);
-	    scope.stat_init = true;
+	    superlu_state->initialize(*setup);
+	    const fact_t solve_fact = superlu_state->prepareSolve();
+	    SuperLUStatScope stat_scope;
 	    const double t_superlu_setup = mark_timing();
 
 	    std::vector<double> berr(std::max<std::size_t>(nrhs, 1), 0.0);
 	    int info = 0;
-	    pzgssvx3d(&options, &scope.A, &scope.ScalePermstruct, b.data(), ldb,
-		      checkedSuperLUCount(nrhs, "nrhs"), &scope.grid, &scope.LUstruct,
-		      &scope.SOLVEstruct, berr.data(), &scope.stat, &info);
+	    pzgssvx3d(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
+		      b.data(), ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid,
+		      &superlu_state->LUstruct, &superlu_state->SOLVEstruct, berr.data(),
+		      &stat_scope.stat, &info);
 	    const double t_pzgssvx3d = mark_timing();
-	    scope.solve_init = true;
-	    scope.a3d_init = scope.SOLVEstruct.A3d != nullptr;
+	    superlu_state->noteSolveReturned();
 	    if (info != 0)
 	      throw std::runtime_error("SuperLU_DIST: pzgssvx3d failed with info=" +
 				       std::to_string(info));
+	    const std::size_t solve_call = superlu_state->markFactorized();
 
 	    std::vector<doublecomplex> send_sol;
 	    send_sol.reserve(setup->recv_sol_local_rows.size() * nrhs);
@@ -5406,7 +5487,10 @@ namespace Chroma
 	      chroma_times.push_back(t_scatter_solution);
 	      chroma_times.push_back(t_copy_output);
 	      reportSuperLUTiming(prefix, superlu_comm, local_superlu, superlu_timing_level, nrhs,
-				  setup->n, setup->m_loc, setup->nnz_loc, chroma_times, scope.stat);
+				  setup->n, setup->m_loc, setup->nnz_loc, chroma_times,
+				  stat_scope.stat, solve_call, solve_fact,
+				  static_cast<const void*>(&superlu_state->LUstruct),
+				  static_cast<const void*>(superlu_state->LUstruct.Llu));
 	    }
 	  },
 	  op.i,

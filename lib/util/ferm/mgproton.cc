@@ -5428,10 +5428,16 @@ namespace Chroma
 
 	    std::vector<double> berr(std::max<std::size_t>(nrhs, 1), 0.0);
 	    int info = 0;
-	    pzgssvx3d(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
-		      b.data(), ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid,
+	    if (superlu_state->npdep == 1)
+	      pzgssvx(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
+		      b.data(), ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid.grid2d,
 		      &superlu_state->LUstruct, &superlu_state->SOLVEstruct, berr.data(),
 		      &stat_scope.stat, &info);
+	    else
+	      pzgssvx3d(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
+			b.data(), ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid,
+			&superlu_state->LUstruct, &superlu_state->SOLVEstruct, berr.data(),
+			&stat_scope.stat, &info);
 	    const double t_pzgssvx3d = mark_timing();
 	    superlu_state->noteSolveReturned();
 	    if (info != 0)
@@ -6021,10 +6027,10 @@ namespace Chroma
 	EO,
 	HIE,
 	DD,
-	BJ,  // Hanzhao
-	JC,  // Hanzhao
-	ILU, // Hanzhao
-	SUPERLU,
+	BJ,	 // Hanzhao
+	JC,	 // Hanzhao
+	ILU,	 // Hanzhao
+	SUPERLU, // Hanzhao
 	SHIFT,
 	PROJ,
 	SPINEO,

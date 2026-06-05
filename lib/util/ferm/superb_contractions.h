@@ -28,6 +28,7 @@
 #  include <array>
 #  include <chrono>
 #  include <cmath>
+#  include <cstdlib>
 #  include <cstring>
 #  include <iomanip>
 #  include <map>
@@ -105,7 +106,7 @@ namespace Chroma
     static const Distribution OnEveryoneReplicated("__OnEveryoneReplicated__");
     /// Local (single process) and non-collective
     static const Distribution Local("");
-    /// Only the local process has support and non-collective 
+    /// Only the local process has support and non-collective
     static const Distribution Glocal("__glocal__");
     /// Distribute along the labels, one at a time
     static const Distribution OnEveryoneCompact("__OnEveryoneCompact__");
@@ -909,7 +910,12 @@ namespace Chroma
 
 	  // Workaround on a potential issue in qdp-jit: avoid passing through the pool allocator
 #    if defined(QDP_IS_QDPJIT)
-	  if (jit_config_get_max_allocation() != 0)
+	  // Set CHROMA_SUPERBBLAS_USE_QDP_ALLOCATOR=0 to keep the QDP-JIT pool enabled
+	  // for Chroma while letting SuperBBLAS use its native GPU allocator.
+	  const char* superbblas_qdp_allocator = std::getenv("CHROMA_SUPERBBLAS_USE_QDP_ALLOCATOR");
+	  const bool use_superbblas_qdp_allocator =
+	    superbblas_qdp_allocator == nullptr || std::atoi(superbblas_qdp_allocator) != 0;
+	  if (use_superbblas_qdp_allocator && jit_config_get_max_allocation() != 0)
 	  {
 	    // Make superbblas use the same memory allocator for gpu as any other qdp-jit lattice object
 	    superbblas::getCustomAllocator() = [](std::size_t size,
@@ -1685,7 +1691,8 @@ namespace Chroma
 								const std::string& dist_labels)
 	{
 	  Coor<N> procs;
-	  for (unsigned int i = 0; i < N; ++i) procs[i] = 1;
+	  for (unsigned int i = 0; i < N; ++i)
+	    procs[i] = 1;
 
 	  // Update the dimension x with the even-odd label X
 	  {
@@ -2895,10 +2902,10 @@ namespace Chroma
       ///   Tensor<2,Complex> v = q.make_compatible<2>("%", '%', "c");
 
       template <std::size_t Nn = N, typename Tn = T>
-      Tensor<Nn, Tn>
-      make_compatible(const std::string& new_order, char remaining_char,
-		const std::string& remove_dims = "", const std::map<char, int>& kvsize = {},
-		Maybe<DeviceHost> new_dev = none) const
+      Tensor<Nn, Tn> make_compatible(const std::string& new_order, char remaining_char,
+				     const std::string& remove_dims = "",
+				     const std::map<char, int>& kvsize = {},
+				     Maybe<DeviceHost> new_dev = none) const
       {
 	return make_compatible<Nn, Tn>(
 	  detail::remove_dimensions(get_order_for_reorder(new_order, remaining_char), remove_dims),
@@ -3202,7 +3209,8 @@ namespace Chroma
 			      Tensor<N, T>>::type
       make_conjugate_explicit() const
       {
-	if (!conjugate) return *this;
+	if (!conjugate)
+	  return *this;
 	return toFakeReal().make_conjugate_explicit().toComplex();
       }
 
@@ -3211,14 +3219,16 @@ namespace Chroma
 			      Tensor<N, T>>::type
       make_conjugate_explicit() const
       {
-	if (!conjugate) return *this;
+	if (!conjugate)
+	  return *this;
 	auto t = make_compatible();
 	auto this_unconj = conj();
 	auto old_scalar = this_unconj.scalar;
 	this_unconj.scalar = value_type{1};
 	this_unconj.kvslice_from_size({{complexLabel, 0}}, {{complexLabel, 1}})
 	  .copyTo(t.kvslice_from_size({{complexLabel, 0}}, {{complexLabel, 1}}));
-	this_unconj.kvslice_from_size({{complexLabel, 1}}, {{complexLabel, 1}}).scale(-1)
+	this_unconj.kvslice_from_size({{complexLabel, 1}}, {{complexLabel, 1}})
+	  .scale(-1)
 	  .copyTo(t.kvslice_from_size({{complexLabel, 1}}, {{complexLabel, 1}}));
 	return t.scale(old_scalar);
       }
@@ -3228,7 +3238,8 @@ namespace Chroma
 			      Tensor<N, T>>::type
       make_conjugate_explicit() const
       {
-	if (!conjugate) return *this;
+	if (!conjugate)
+	  return *this;
 	return conj();
       }
 
@@ -3624,8 +3635,8 @@ namespace Chroma
 
 	return Tensor<N, T>(order, dim, allocation,
 			    std::make_shared<detail::TensorPartition<N>>(p->get_glocal_partition()),
-			    Glocal, from, size, scalar, conjugate, eg,
-			    false /* ordered writing */, complexLabel);
+			    Glocal, from, size, scalar, conjugate, eg, false /* ordered writing */,
+			    complexLabel);
       }
 
       /// Set zero
@@ -3899,7 +3910,8 @@ namespace Chroma
 	  comm = MPI_COMM_SELF;
 	}
 	// c) any is glocal
-	if (dist == Glocal || w.dist == Glocal) {
+	if (dist == Glocal || w.dist == Glocal)
+	{
 	  comm = MPI_COMM_SELF;
 	  p_disp = p->MpiProcRank();
 	}
@@ -4005,7 +4017,7 @@ namespace Chroma
 
 	MPI_Comm comm = (dist == Local || dist == Glocal ? MPI_COMM_SELF : MPI_COMM_WORLD);
 	auto p_disp = (dist == Glocal ? p->MpiProcRank() : 0);
-	
+
 	value_type* v_ptr = v.data();
 	value_type* w_ptr = w.data();
 	value_type* ptr = std::norm(beta) == 0 ? data_for_writing() : data();
@@ -4090,7 +4102,7 @@ namespace Chroma
 
 	MPI_Comm comm = (dist == Local || dist == Glocal ? MPI_COMM_SELF : MPI_COMM_WORLD);
 	auto p_disp = (dist == Glocal ? p->MpiProcRank() : 0);
-	
+
 	value_type* v_ptr = v.data();
 	value_type* w_ptr = w.data();
 	value_type* ptr = data_for_writing();
@@ -4213,7 +4225,7 @@ namespace Chroma
 
 	MPI_Comm comm = (dist == Local || dist == Glocal ? MPI_COMM_SELF : MPI_COMM_WORLD);
 	auto p_disp = (dist == Glocal ? p->MpiProcRank() : 0);
-	
+
 	value_type* v_ptr = v.data();
 	value_type* w_ptr = w.data();
 	value_type* ptr = data_for_writing();
@@ -4261,7 +4273,8 @@ namespace Chroma
 	  clone().svd(order_rows, order_cols, u, s, v);
 	  return;
 	}
-	if (u.isSubtensor() || u.scalar != T{1} || s.isSubtensor() || v.isSubtensor() || v.scalar != T{1})
+	if (u.isSubtensor() || u.scalar != T{1} || s.isSubtensor() || v.isSubtensor() ||
+	    v.scalar != T{1})
 	{
 	  auto u0 = u;
 	  auto s0 = s;
@@ -4280,23 +4293,24 @@ namespace Chroma
 	}
 
 	bool some_is_local = dist == Local || v.dist == Local || s.dist == Local || v.dist == Local;
-	bool some_isnt_local = dist != Local || v.dist != Local || s.dist != Local || v.dist != Local;
+	bool some_isnt_local =
+	  dist != Local || v.dist != Local || s.dist != Local || v.dist != Local;
 	if (some_is_local && some_isnt_local)
 	  throw std::runtime_error("svd: the input tensor or on of the output tensors "
 				   "is local/glocal and others are not!");
 
 	MPI_Comm comm = (dist == Local || dist == Glocal ? MPI_COMM_SELF : MPI_COMM_WORLD);
 	auto p_disp = (dist == Glocal ? p->MpiProcRank() : 0);
-	
+
 	value_type* ptr = data();
 	value_type* u_ptr = u.data_for_writing();
 	real_value_type* s_ptr = s.data_for_writing();
 	value_type* v_ptr = v.data_for_writing();
 	superbblas::svd<N, Nu, Ns, Nv>(
 	  scalar / T(s.scalar), //
-	  p->p.data() + p_disp, dim, 1, order.c_str(), (const value_type**)&ptr,
-	  order_rows.c_str(), order_cols.c_str(),
-	  &ctx(), //
+	  p->p.data() + p_disp, dim, 1, order.c_str(), (const value_type**)&ptr, order_rows.c_str(),
+	  order_cols.c_str(),
+	  &ctx(),							       //
 	  u.p->p.data() + p_disp, u.dim, 1, u.order.c_str(), &u_ptr, &u.ctx(), //
 	  s.p->p.data() + p_disp, s.dim, 1, s.order.c_str(), &s_ptr, &s.ctx(), //
 	  v.p->p.data() + p_disp, v.dim, 1, v.order.c_str(), &v_ptr, &v.ctx(), //
@@ -4738,9 +4752,11 @@ namespace Chroma
 
       // Get the dimensions of the identity tensor
       std::map<char, int> iden_dim;
-      for (const auto& it : dim) {
+      for (const auto& it : dim)
+      {
 	iden_dim[it.first] = (detail::is_in(ot, it.first) ? 1 : it.second);
-	if (detail::is_in(orows, it.first)) iden_dim[m.at(it.first)] = it.second;
+	if (detail::is_in(orows, it.first))
+	  iden_dim[m.at(it.first)] = it.second;
       }
 
       // Create the identity tensor
@@ -4757,16 +4773,19 @@ namespace Chroma
 
       // Get the dimensions of the returned tensor
       std::map<char, int> t_dim;
-      for (const auto& it : dim) {
+      for (const auto& it : dim)
+      {
 	t_dim[it.first] = (!detail::is_in(ot, it.first) ? 1 : it.second);
-	if (detail::is_in(orows, it.first)) t_dim[m.at(it.first)] = 1;
+	if (detail::is_in(orows, it.first))
+	  t_dim[m.at(it.first)] = 1;
       }
       Tensor<N, T> t{order, kvcoors<N>(order, t_dim, 0, ThrowOnMissing), OnDefaultDevice, dist};
       t.set(1);
 
       std::map<char, int> r_dim = dim;
       for (const auto& it : dim)
-	if (detail::is_in(orows, it.first)) r_dim[m.at(it.first)] = it.second;
+	if (detail::is_in(orows, it.first))
+	  r_dim[m.at(it.first)] = it.second;
       Tensor<N, T> r{order, kvcoors<N>(order, r_dim, 0, ThrowOnMissing), OnDefaultDevice, dist};
 
       kronecker(t, iden, r);
@@ -5070,7 +5089,7 @@ namespace Chroma
     /// Example:
     ///
     ///   Tensor<2,Complex> t("cs", {{Nc,Ns}});
-    ///   auto frob_norm = fnorm(t); 
+    ///   auto frob_norm = fnorm(t);
 
     template <std::size_t N, typename T>
     typename detail::real_type<T>::type fnorm(const Tensor<N, T>& v)
@@ -5254,7 +5273,7 @@ namespace Chroma
 
     template <std::size_t N, typename T>
     Tensor<N, T> inv(const Tensor<N, T>& v, const std::string& order_rows,
-		       const std::string& order_cols, Tensor<N, T> r = {})
+		     const std::string& order_cols, Tensor<N, T> r = {})
     {
       if (r && detail::union_dimensions(v.order, r.order) != v.order)
 	throw std::runtime_error("inv: The given output tensor has an unexpected ordering");
@@ -5329,7 +5348,8 @@ namespace Chroma
       // Create the output matrices
       auto new_labels = std::map<char, int>{{index_label, index_size}};
       auto u = x.template make_compatible<Nu>(uorder, new_labels);
-      auto s = x.template make_compatible<Ns, typename detail::real_type<T>::type>(sorder, new_labels);
+      auto s =
+	x.template make_compatible<Ns, typename detail::real_type<T>::type>(sorder, new_labels);
       auto v = x.template make_compatible<Nv>(vorder, new_labels);
 
       // Compute the svd
@@ -5341,7 +5361,7 @@ namespace Chroma
 	auto r = contract<Nx>(contract<Nu>(u, s.template make_sure<T>(), ""), v.conj(),
 			      std::string{index_label});
 	x.scale(-1).addTo(r);
-	
+
 	auto eps = std::sqrt(std::numeric_limits<typename detail::real_type<T>::type>::epsilon());
 	if (fnorm(x) * eps > fnorm(r))
 	  throw std::runtime_error(std::string("svd: too much error"));
@@ -5367,7 +5387,8 @@ namespace Chroma
       {
 	auto rptr = r_local.data();
 	auto w0ptr = w0_local.data();
-	for (std::size_t i = 0, vol = r_local.volume(); i < vol; ++i) {
+	for (std::size_t i = 0, vol = r_local.volume(); i < vol; ++i)
+	{
 	  auto w0i =
 	    detail::cond_conj(r_local.conjugate != w0_local.conjugate, w0ptr[i] * w0_local.scalar);
 	  rptr[i] = std::norm(w0i) == 0 ? T{0} : rptr[i] / w0i;
@@ -5591,21 +5612,21 @@ namespace Chroma
     Tensor<N, T> local_support_tensor(const std::string& order, Coor<N - 1> dim,
 				      DeviceHost dev = OnDefaultDevice)
     {
-	char proc_label = detail::get_free_label(order);
-	std::string this_order = std::string{proc_label} + order;
-	auto this_dim = detail::insert_coor(dim, 0, Layout::numNodes());
-	return Tensor<N, T>(this_order, this_dim, dev, std::string{proc_label},
-			    std::make_shared<detail::TensorPartition<N>>(detail::TensorPartition<N>(
-			      this_order, this_dim, std::string{proc_label})),
-			    false /*= unordered_writing */, 0 /* no complexLabel*/);
+      char proc_label = detail::get_free_label(order);
+      std::string this_order = std::string{proc_label} + order;
+      auto this_dim = detail::insert_coor(dim, 0, Layout::numNodes());
+      return Tensor<N, T>(this_order, this_dim, dev, std::string{proc_label},
+			  std::make_shared<detail::TensorPartition<N>>(detail::TensorPartition<N>(
+			    this_order, this_dim, std::string{proc_label})),
+			  false /*= unordered_writing */, 0 /* no complexLabel*/);
     }
 
     /// Broadcast a string from process zero
     inline int global_max(int s)
     {
-	auto r = local_support_tensor<int, 2>("i", {1}, OnHost);
-	r.getLocal().set({{0, 0}}, s);
-	return max(r.make_sure(none, none, OnEveryoneReplicated));
+      auto r = local_support_tensor<int, 2>("i", {1}, OnHost);
+      r.getLocal().set({{0, 0}}, s);
+      return max(r.make_sure(none, none, OnEveryoneReplicated));
     }
 
     template <std::size_t N, typename T>
@@ -5634,17 +5655,17 @@ namespace Chroma
       static_assert(superbblas::supported_type<value_type>::value, "Not supported type");
 
     public:
-      Tensor<ND, T> d;		   ///< Tensor example for the domain
-      Tensor<NI, T> i;		   ///< Tensor example for the image
-      Coor<ND> blkd;		   ///< blocking for the domain
-      Coor<NI> blki;		   ///< blocking for the image
-      Coor<ND> krond;		   ///< Kronecker blocking for the domain
-      Coor<NI> kroni;		   ///< Kronecker blocking for the image
-      Tensor<NI, int> ii;	   ///< Number of blocks in each row
-      Tensor<NI + 2, int> jj;	   ///< Coordinate of the first element on each block
-      Tensor<NI + ND + 1, T> data; ///< Nonzero values
-      Tensor<NI + ND + 1, T> kron; ///< Nonzero values for the Kronecker values
-      std::map<char, int> domain_extension;	      ///< domain neighbors
+      Tensor<ND, T> d;			    ///< Tensor example for the domain
+      Tensor<NI, T> i;			    ///< Tensor example for the image
+      Coor<ND> blkd;			    ///< blocking for the domain
+      Coor<NI> blki;			    ///< blocking for the image
+      Coor<ND> krond;			    ///< Kronecker blocking for the domain
+      Coor<NI> kroni;			    ///< Kronecker blocking for the image
+      Tensor<NI, int> ii;		    ///< Number of blocks in each row
+      Tensor<NI + 2, int> jj;		    ///< Coordinate of the first element on each block
+      Tensor<NI + ND + 1, T> data;	    ///< Nonzero values
+      Tensor<NI + ND + 1, T> kron;	    ///< Nonzero values for the Kronecker values
+      std::map<char, int> domain_extension; ///< domain neighbors
       std::shared_ptr<superbblas::BSR_handle> handle; ///< suparbblas sparse tensor handle
       value_type scalar;			      ///< Scalar factor of the tensor
       bool isImgFastInBlock;			      ///< whether the BSR blocks are in row-major
@@ -5846,8 +5867,8 @@ namespace Chroma
 	    (kron && kron.dist != detail::compatible_replicated_distribution(ii.dist)))
 	  throw std::runtime_error("SpTensor::construct: unexpected distribution of the data");
 
-	// Superbblas needs the column coordinates to be local
-#if SUPERBBLAS_VERSION < 3
+	  // Superbblas needs the column coordinates to be local
+#  if SUPERBBLAS_VERSION < 3
 	// Remove the local domain coordinates to jj
 	const auto new_d = d.extend_support(domain_extension);
 	const auto d_partition = new_d.p->p;
@@ -5857,11 +5878,11 @@ namespace Chroma
 	  jj.template transformWithCPUFunWithCoor<int>([&](const Coor<NI + 2>& c, const int& t) {
 	    return (t - localFrom[c[0]] + domDim[c[0]]) % domDim[c[0]];
 	  });
-#else
+#  else
 	auto localjj = jj;
 	const auto d_partition =
 	  d.p->extend_support_removing_corners(kvcoors<ND>(d.order, domain_extension, 0)).p;
-#endif
+#  endif
 
 	std::string nonblock_img_labels(i.order.begin() + nblocki + nkroni, i.order.end());
 	if (!ii.isDistributedAs(this->i, nonblock_img_labels) ||
@@ -6107,7 +6128,8 @@ namespace Chroma
       {
 	// Check that the object is not local or glocal (FIXME)
 	if (ii.dist == Local || ii.dist == Glocal)
-	  throw std::runtime_error("SpTensor::kvslice_from_size: unexpected distribution of the data");
+	  throw std::runtime_error(
+	    "SpTensor::kvslice_from_size: unexpected distribution of the data");
 
 	// Check that we aren't slicing the blocking dimensions
 	bool fail = false;
@@ -7168,10 +7190,10 @@ namespace Chroma
       Coor<N> dim;	    ///< Length of the tensor dimensions
       Sparsity sparsity;    ///< Sparsity of the storage
       std::shared_ptr<superbblas::detail::Storage_context_abstract>
-	ctx;	    ///< Superbblas storage handler
-      Coor<N> from; ///< First active coordinate in the tensor
-      Coor<N> size; ///< Number of active coordinates on each dimension
-      T scalar;	    ///< Scalar factor of the tensor
+	ctx;			       ///< Superbblas storage handler
+      Coor<N> from;		       ///< First active coordinate in the tensor
+      Coor<N> size;		       ///< Number of active coordinates on each dimension
+      T scalar;			       ///< Scalar factor of the tensor
       LocalSharedFile filesystem_type; ///< whether the file is in a local/share filesystem
 
       // Empty constructor
@@ -7211,9 +7233,8 @@ namespace Chroma
 			: std::string(".part_") + std::to_string(Layout::nodeNumber()));
 	MPI_Comm comm = filesystem_type == SharedFSFile ? MPI_COMM_WORLD : MPI_COMM_SELF;
 	superbblas::Storage_handle stoh;
-	superbblas::create_storage<N, T>(
-	  dim, superbblas::FastToSlow, use_filename.c_str(), metadata.c_str(), metadata.size(),
-	  checksum, comm, &stoh);
+	superbblas::create_storage<N, T>(dim, superbblas::FastToSlow, use_filename.c_str(),
+					 metadata.c_str(), metadata.size(), checksum, comm, &stoh);
 	ctx = std::shared_ptr<superbblas::detail::Storage_context_abstract>(
 	  stoh, [=](superbblas::detail::Storage_context_abstract* ptr) {
 	    superbblas::close_storage<N, T>(ptr, comm);
@@ -7423,16 +7444,16 @@ namespace Chroma
 	// If the storage is sparse, add blocks for the new content
 	if (sparsity == Sparse)
 	{
-	  superbblas::append_blocks<Nw, N, T>(w0_p, w0_p_size, w0.order.c_str(), w0.from,
-					      w0.size, w0.dim, order.c_str(), from, ctx.get(), comm,
+	  superbblas::append_blocks<Nw, N, T>(w0_p, w0_p_size, w0.order.c_str(), w0.from, w0.size,
+					      w0.dim, order.c_str(), from, ctx.get(), comm,
 					      superbblas::FastToSlow);
 	}
 
 	Tw* w_ptr = w0.data();
 	superbblas::save<Nw, N, Tw, T>(detail::safe_div<Tw>(w.scalar, scalar), w0_p, 1,
-				       w0.order.c_str(), w0.from, w0.size, w0.dim, (const Tw**)&w_ptr,
-				       &w0.ctx(), order.c_str(), from, ctx.get(), comm,
-				       superbblas::FastToSlow);
+				       w0.order.c_str(), w0.from, w0.size, w0.dim,
+				       (const Tw**)&w_ptr, &w0.ctx(), order.c_str(), from,
+				       ctx.get(), comm, superbblas::FastToSlow);
       }
 
       /// Load content from the storage into the given tensor
@@ -7447,7 +7468,8 @@ namespace Chroma
 	    throw std::runtime_error("The destination tensor is smaller than the source tensor");
 
 	if (filesystem_type == LocalFSFile && !detail::is_distribution_local(w.dist))
-	  throw std::runtime_error("Unsupported a collective tensor from reading from a local file");
+	  throw std::runtime_error(
+	    "Unsupported a collective tensor from reading from a local file");
 
 	MPI_Comm comm = filesystem_type == SharedFSFile ? MPI_COMM_WORLD : MPI_COMM_SELF;
 	auto w0 = w;
@@ -8590,10 +8612,10 @@ namespace Chroma
 	  neighbors = new_neighbors;
 	}
 
-        // Chose a dense label that is not the spin
-        const char color_label = 'c';
+	// Chose a dense label that is not the spin
+	const char color_label = 'c';
 
-        // Extract the kronecker values with probing
+	// Extract the kronecker values with probing
 	Tensor<3, COMPLEX> kron;
 	std::vector<std::map<char, int>> nonzero_spins;
 	if (kronecker_label != 0)
@@ -8606,7 +8628,9 @@ namespace Chroma
 
 	  // Skip empty masks
 	  // NOTE: the call to split_dimension add a fake dimension that acts as columns
-	  if (std::norm(norm<1>(t_l.split_dimension('X', "Xn", maxX), "n").get({{0}})) == 0)
+	  auto color_norm =
+	    norm<1>(t_l.split_dimension('X', "Xn", maxX), "n").make_sure(none, OnHost);
+	  if (std::norm(color_norm.get({{0}})) == 0)
 	    throw std::runtime_error("Ups! We should do something more sophisticated here");
 
 	  // Contracting the proving vector with the blocking components
@@ -8619,25 +8643,25 @@ namespace Chroma
 	    op(contract<NOp + Nblk>(t_l, t_blk.kvslice_from_size({}, {{rd[color_label], 1}}), ""));
 
 	  // Take a source
-          auto source_coor =
-              colors.find([&](float site_color) { return site_color == color; })
-                  .getSome();
-          std::map<char, int> source;
-          for (std::size_t i = 0; i < colors.order.size(); ++i)
-            if (is_in("xyztX", colors.order[i]))
-              source[colors.order[i]] = source_coor[i];
+	  auto source_coor =
+	    colors.find([&](float site_color) { return site_color == color; }).getSome();
+	  std::map<char, int> source;
+	  for (std::size_t i = 0; i < colors.order.size(); ++i)
+	    if (is_in("xyztX", colors.order[i]))
+	      source[colors.order[i]] = source_coor[i];
 
-          // Find the spin values for each direction
-          std::string kron_order(3, 0);
-          kron_order[0] = kronecker_label;
-          kron_order[1] = rd[kronecker_label];
-          kron_order[2] = 'u';
+	  // Find the spin values for each direction
+	  std::string kron_order(3, 0);
+	  kron_order[0] = kronecker_label;
+	  kron_order[1] = rd[kronecker_label];
+	  kron_order[2] = 'u';
 	  kron = Tensor<3, COMPLEX>(
 	    kron_order,
 	    Coor<3>{blki[kronecker_label], blki[kronecker_label], (int)neighbors.size()},
 	    OnDefaultDevice, compatible_replicated_distribution(i.dist));
 	  kron.set_zero();
-          for (int mu = 0; mu < neighbors.size(); ++mu) {
+	  for (int mu = 0; mu < neighbors.size(); ++mu)
+	  {
 	    // site = source + neighbors[mu], where the latter is in natural
 	    // coordinates
 	    const auto& coor_dir = neighbors[mu];
@@ -8654,51 +8678,52 @@ namespace Chroma
 	    auto site_data = mv.kvslice_from_size(site, site_size)
 			       .make_sure(none, OnHost, compatible_replicated_distribution(i.dist));
 
-	    if (!spin_matrix[mu]) {
-              // Search for a nonzero element, we take the largest.
-              // NOTE: don't take from spin block diagonal matrix, those
-              // nonzeros are captured already
-              auto spin_vals =
-                  norm<2>(site_data, std::string(1, kronecker_label) +
-                                         std::string(1, rd[kronecker_label]));
-              int s_ref = 0;
-              double val_ref = 0;
-              for (int s = 0; s < blki[kronecker_label] * blki[kronecker_label];
-                   ++s) {
-                if (s % blki[kronecker_label] == s / blki[kronecker_label])
-                  continue;
+	    if (!spin_matrix[mu])
+	    {
+	      // Search for a nonzero element, we take the largest.
+	      // NOTE: don't take from spin block diagonal matrix, those
+	      // nonzeros are captured already
+	      auto spin_vals = norm<2>(site_data, std::string(1, kronecker_label) +
+						    std::string(1, rd[kronecker_label]));
+	      int s_ref = 0;
+	      double val_ref = 0;
+	      for (int s = 0; s < blki[kronecker_label] * blki[kronecker_label]; ++s)
+	      {
+		if (s % blki[kronecker_label] == s / blki[kronecker_label])
+		  continue;
 		double val = spin_vals.get(
 		  kvcoors<2>(spin_vals.order, {{kronecker_label, s % blki[kronecker_label]},
 					       {rd[kronecker_label], s / blki[kronecker_label]}}));
-		if (val > val_ref) {
-                  s_ref = s;
-                  val_ref = val;
-                }
-              }
+		if (val > val_ref)
+		{
+		  s_ref = s;
+		  val_ref = val;
+		}
+	      }
 
-              // If the direction is empty, remove it!
-              if (val_ref == 0) {
-                neighbors.erase(neighbors.begin() + mu);
-                spin_matrix.erase(spin_matrix.begin() + mu);
-                mu--;
-                continue;
-              }
+	      // If the direction is empty, remove it!
+	      if (val_ref == 0)
+	      {
+		neighbors.erase(neighbors.begin() + mu);
+		spin_matrix.erase(spin_matrix.begin() + mu);
+		mu--;
+		continue;
+	      }
 
-              nonzero_spins.push_back(
-                  {{kronecker_label, s_ref % blki[kronecker_label]},
-                   {rd[kronecker_label], s_ref / blki[kronecker_label]}});
+	      nonzero_spins.push_back({{kronecker_label, s_ref % blki[kronecker_label]},
+				       {rd[kronecker_label], s_ref / blki[kronecker_label]}});
 
-              // Get the values
+	      // Get the values
 	      auto val0 = site_data.get(kvcoors<NOp + Nblk>(
 		site_data.order, {{kronecker_label, s_ref % blki[kronecker_label]},
 				  {rd[kronecker_label], s_ref / blki[kronecker_label]},
 				  {color_label, 0},
 				  {rd.at(color_label), 0}}));
 
-	      for (int s = 0; s < blki[kronecker_label] * blki[kronecker_label];
-                   ++s) {
-                if (s % blki[kronecker_label] == s / blki[kronecker_label])
-                  continue;
+	      for (int s = 0; s < blki[kronecker_label] * blki[kronecker_label]; ++s)
+	      {
+		if (s % blki[kronecker_label] == s / blki[kronecker_label])
+		  continue;
 		kron.set(kvcoors<3>(kron.order, {{kronecker_label, s % blki[kronecker_label]},
 						 {rd[kronecker_label], s / blki[kronecker_label]},
 						 {'u', mu}}),
@@ -8709,41 +8734,42 @@ namespace Chroma
 					     {rd.at(color_label), 0}})) /
 			   val0);
 	      }
-            } else {
-	      if (std::norm(
-		    norm<1>(contract<NOp + Nblk + 1>(spin_matrix[mu].template reshape_dimensions<3>(
-						       {{"s", "su"}}, {{'u', 1}}),
-						     site_data, ""),
-			    "u")
-		      .get(Coor<1>{0})) == 0)
+	    }
+	    else
+	    {
+	      auto spin_norm =
+		norm<1>(contract<NOp + Nblk + 1>(
+			  spin_matrix[mu].template reshape_dimensions<3>({{"s", "su"}}, {{'u', 1}}),
+			  site_data, ""),
+			"u")
+		  .make_sure(none, OnHost);
+	      if (std::norm(spin_norm.get(Coor<1>{0})) == 0)
 	      {
 		neighbors.erase(neighbors.begin() + mu);
-                spin_matrix.erase(spin_matrix.begin() + mu);
-                mu--;
-                continue;
+		spin_matrix.erase(spin_matrix.begin() + mu);
+		mu--;
+		continue;
 	      }
 
 	      // Copy the know spin matrix into sop.kron
-              spin_matrix[mu].copyTo(
-                  kron.kvslice_from_size({{'u', mu}}, {{'u', 1}}));
+	      spin_matrix[mu].copyTo(kron.kvslice_from_size({{'u', mu}}, {{'u', 1}}));
 
-              // Set as the reference spin, the first nonzero
-              for (int s = 0; s < blki[kronecker_label] * blki[kronecker_label];
-                   ++s) {
-                if (std::norm(spin_matrix[mu].get(
-                        {{s % blki[kronecker_label],
-                          s / blki[kronecker_label]}})) > 0) {
-                  nonzero_spins.push_back(
-                      {{kronecker_label, s % blki[kronecker_label]},
-                       {rd[kronecker_label], s / blki[kronecker_label]}});
-                  break;
-                }
-              }
-            }
+	      // Set as the reference spin, the first nonzero
+	      for (int s = 0; s < blki[kronecker_label] * blki[kronecker_label]; ++s)
+	      {
+		if (std::norm(spin_matrix[mu].get(
+		      {{s % blki[kronecker_label], s / blki[kronecker_label]}})) > 0)
+		{
+		  nonzero_spins.push_back({{kronecker_label, s % blki[kronecker_label]},
+					   {rd[kronecker_label], s / blki[kronecker_label]}});
+		  break;
+		}
+	      }
+	    }
 	  }
-        }
+	}
 
-        // Create masks for the elements with even natural x coordinate and with odd natural x coordinate
+	// Create masks for the elements with even natural x coordinate and with odd natural x coordinate
 	auto even_x_mask = getXOddityMask<NOp>(0, i, op.imgLayout);
 	auto odd_x_mask = getXOddityMask<NOp>(1, i, op.imgLayout);
 	auto ones_blk = t_blk.template like_this<Nblk * 2, float>();
@@ -8784,57 +8810,57 @@ namespace Chroma
 
 	  // Skip empty masks
 	  // NOTE: the call to split_dimension add a fake dimension that acts as columns
-          if (std::norm(norm<1>(t_l.split_dimension('X', "Xn", maxX), "n")
-                            .get({{0}})) == 0)
-            continue;
+	  auto color_norm =
+	    norm<1>(t_l.split_dimension('X', "Xn", maxX), "n").make_sure(none, OnHost);
+	  if (std::norm(color_norm.get({{0}})) == 0)
+	    continue;
 
-          for (int color_idx = 0; color_idx < blki[color_label]; ++color_idx) {
-            std::map<char, int> colorFrom{{rd[color_label], color_idx}};
-            std::map<char, int> colorSize{{rd[color_label], 1}};
+	  for (int color_idx = 0; color_idx < blki[color_label]; ++color_idx)
+	  {
+	    std::map<char, int> colorFrom{{rd[color_label], color_idx}};
+	    std::map<char, int> colorSize{{rd[color_label], 1}};
 
-            // Contracting the proving vector with the blocking components
+	    // Contracting the proving vector with the blocking components
 	    auto probs =
 	      contract<NOp + Nblk>(t_l, t_blk.kvslice_from_size(colorFrom, colorSize), "");
 
 	    // Compute the matvecs
-            auto mv = op(std::move(probs));
+	    auto mv = op(std::move(probs));
 
-            // Construct an indicator tensor where all blocking dimensions but
-            // only the nodes colored `color` are copied
-            auto color_mask = t_l.template transformWithCPUFun<float>(
-                [](const value_type &t) { return (float)std::real(t); });
-            auto sel_x_even = contract<NOp + Nblk>(
-                contract<NOp>(color_mask, even_x_mask, ""),
-                ones_blk.kvslice_from_size(colorFrom, colorSize), "");
-            auto sel_x_odd = contract<NOp + Nblk>(
-                contract<NOp>(color_mask, odd_x_mask, ""),
-                ones_blk.kvslice_from_size(colorFrom, colorSize), "");
+	    // Construct an indicator tensor where all blocking dimensions but
+	    // only the nodes colored `color` are copied
+	    auto color_mask = t_l.template transformWithCPUFun<float>(
+	      [](const value_type& t) { return (float)std::real(t); });
+	    auto sel_x_even =
+	      contract<NOp + Nblk>(contract<NOp>(color_mask, even_x_mask, ""),
+				   ones_blk.kvslice_from_size(colorFrom, colorSize), "");
+	    auto sel_x_odd =
+	      contract<NOp + Nblk>(contract<NOp>(color_mask, odd_x_mask, ""),
+				   ones_blk.kvslice_from_size(colorFrom, colorSize), "");
 
-            // Populate the nonzeros by copying pieces from `mv` into sop.data.
-            // We want to copy only the nonzeros in `mv`, which are `neighbors`
-            // away from the nonzeros of `probs`.
-            auto sop_data = sop.data.kvslice_from_size(colorFrom, colorSize);
-            if (kronecker_label == 0) {
-              latticeCopyToWithMask(mv, sop_data, 'u', neighbors,
-                                    {{'X', real_maxX}}, sel_x_even, sel_x_odd);
-            } else {
-              std::map<char, int> single_spin{{kronecker_label, 1},
-                                              {rd[kronecker_label], 1}};
-              for (int dir = 0; dir < neighbors.size(); ++dir)
-                latticeCopyToWithMask(
-                    mv.kvslice_from_size(nonzero_spins[dir], single_spin),
-                    sop_data.kvslice_from_size({{'u', dir}}, {{'u', 1}}), 'u',
-                    std::vector<Coor<Nd>>(1, neighbors[dir]),
-                    {{'X', real_maxX}},
-                    sel_x_even.kvslice_from_size(nonzero_spins[dir],
-                                                 single_spin),
-                    sel_x_odd.kvslice_from_size(nonzero_spins[dir],
-                                                single_spin));
-            }
-          }
-        }
+	    // Populate the nonzeros by copying pieces from `mv` into sop.data.
+	    // We want to copy only the nonzeros in `mv`, which are `neighbors`
+	    // away from the nonzeros of `probs`.
+	    auto sop_data = sop.data.kvslice_from_size(colorFrom, colorSize);
+	    if (kronecker_label == 0)
+	    {
+	      latticeCopyToWithMask(mv, sop_data, 'u', neighbors, {{'X', real_maxX}}, sel_x_even,
+				    sel_x_odd);
+	    }
+	    else
+	    {
+	      std::map<char, int> single_spin{{kronecker_label, 1}, {rd[kronecker_label], 1}};
+	      for (int dir = 0; dir < neighbors.size(); ++dir)
+		latticeCopyToWithMask(mv.kvslice_from_size(nonzero_spins[dir], single_spin),
+				      sop_data.kvslice_from_size({{'u', dir}}, {{'u', 1}}), 'u',
+				      std::vector<Coor<Nd>>(1, neighbors[dir]), {{'X', real_maxX}},
+				      sel_x_even.kvslice_from_size(nonzero_spins[dir], single_spin),
+				      sel_x_odd.kvslice_from_size(nonzero_spins[dir], single_spin));
+	    }
+	  }
+	}
 
-        // Populate the coordinate of the columns, that is, to give the domain coordinates of first nonzero in each
+	// Populate the coordinate of the columns, that is, to give the domain coordinates of first nonzero in each
 	// BSR nonzero block. Assume that we are processing nonzeros block for the image coordinate `c` on the
 	// direction `dir`, that is, the domain coordinates will be (cx-dirx,cy-diry,cz-dirz,dt-dirt) in natural
 	// coordinates. But we get the image coordinate `c` in even-odd coordinate, (cX,cx,cy,cz,ct), which has the
@@ -9514,7 +9540,7 @@ namespace Chroma
     struct ColorvecsStorage {
       std::shared_ptr<MODS_t> mod;	   // old storage
       StorageTensor<Nd + 2, ComplexD> s3t; // cxyztn
-      bool is_dummy; /// whether to create random numbers
+      bool is_dummy;			   /// whether to create random numbers
     };
 
     namespace ns_getColorvecs
@@ -9704,8 +9730,8 @@ namespace Chroma
 
       template <std::size_t N>
       struct OperatorAux {
-	const Operator<N, ComplexD> op;	     // Operator, most likely cxyztX or csxyztX
-	const DeviceHost primme_dev;	     // where primme allocations are
+	const Operator<N, ComplexD> op; // Operator, most likely cxyztX or csxyztX
+	const DeviceHost primme_dev;	// where primme allocations are
       };
 
       // Wrapper for PRIMME of `LaplacianOperator`
@@ -9817,8 +9843,8 @@ namespace Chroma
 	std::vector<Tensor<Nd + 3, ComplexD>> ut_global(Nd - 1);
 	for (unsigned int d = 0; d < Nd - 1; d++)
 	{
-	ut_global[d] = asTensorView(u[d])
-			 .kvslice_from_size({{'t', from_tslice}}, {{'t', n_tslices}})
+	  ut_global[d] = asTensorView(u[d])
+			   .kvslice_from_size({{'t', from_tslice}}, {{'t', n_tslices}})
 			   .toComplex()
 			   .template make_sure<ComplexD>("ijxyztX", none, "t");
 	}
@@ -10715,7 +10741,7 @@ namespace Chroma
 	std::vector<std::array<int, 2>> v(4);
 	for (int i = 0; i < 4; ++i)
 	{
-	    v[i] = {i, counts[i]};
+	  v[i] = {i, counts[i]};
 	}
 
 	// Sort them ascendantly on the number of counts
@@ -10992,8 +11018,8 @@ namespace Chroma
 	    "mQNqc%xyzXt", '%', "", {{'m', msize}, {'t', num_active_tslices}});
 	  moms_left.contract(std::move(momst), {}, Conjugate, std::move(leftconj_nat), {},
 			     NotConjugate);
-          momst.release(); // NOTE: the std::move's in previous line aren't effective
-          leftconj_nat.release();
+	  momst.release(); // NOTE: the std::move's in previous line aren't effective
+	  leftconj_nat.release();
 	  if (tfrom + tsize >= save_from + save_size && mfrom + msize >= moms.size())
 	    leftconj.release();
 
@@ -11417,7 +11443,8 @@ namespace Chroma
 	  ut[d] = detail::toNaturalOrdering(
 		    asTensorView(u[d])
 		      .kvslice_from_size({{'t', first_tslice + tfrom}}, {{'t', tsize}})
-		      .toComplex(), first_tslice + tfrom)
+		      .toComplex(),
+		    first_tslice + tfrom)
 		    .make_sure(none, dev, dist);
 	}
 

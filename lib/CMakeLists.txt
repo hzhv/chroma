@@ -861,11 +861,11 @@ list(APPEND ChromaLIB_HEADERS
 	util/ferm/twoquark_contract_ops.h
 )
 
-#  These files were commented out in the origina Makefile.am
-#	actions/ferm/fermacts/flic_fermact_params_w.h
-#	actions/ferm/fermacts/eoprec_flic_fermact_w.h
-#	actions/ferm/fermacts/flic_fermstate_w.h
-#	actions/ferm/linop/eoprec_flic_linop_w.h
+#These files were commented out in the origina Makefile.am
+#actions / ferm / fermacts / flic_fermact_params_w.h
+#actions / ferm / fermacts / eoprec_flic_fermact_w.h
+#actions / ferm / fermacts / flic_fermstate_w.h
+#actions / ferm / linop / eoprec_flic_linop_w.h
 
 list(APPEND ChromaLIB_HEADERS 
 	stagtype_fermact_s.h
@@ -1072,10 +1072,10 @@ list(APPEND ChromaLIB_HEADERS
 
 
 ### Commented out for now
-#	meas/inline/hadron/inline_spectrum_w.h
-#	meas/hadron/multipole_w.h
-#	meas/inline/hadron/inline_multipole_w.h
-#   meas/inline/hadron/inline_spectrumQll.h
+#meas / inline / hadron / inline_spectrum_w.h
+#meas / hadron / multipole_w.h
+#meas / inline / hadron / inline_multipole_w.h
+#meas / inline / hadron / inline_spectrumQll.h
 
 target_sources(chromalib PRIVATE 
 	actions/boson/operator/klein_gord.cc 
@@ -1446,7 +1446,7 @@ target_sources(chromalib PRIVATE
 )
 
 ########################################################
-#  Wilson Sources
+#Wilson Sources
 ########################################################
 target_sources(chromalib PRIVATE 
 	actions/ferm/fermacts/fermacts_aggregate_w.cc 
@@ -1701,7 +1701,7 @@ target_sources(chromalib PRIVATE
 )
 
 ########################################################
-#  Inline Measurement sources
+#Inline Measurement sources
 ########################################################
 target_sources(chromalib PRIVATE
 	io/inline_io.cc 
@@ -1842,14 +1842,14 @@ target_sources(chromalib PRIVATE
 	meas/inline/smear/inline_link_smear.cc
 )
 
-# Taken Out of original build Makefile.am
+#Taken Out of original build Makefile.am
 #
-#	meas/inline/hadron/inline_spectrum_w.cc
-#	meas/inline/hadron/inline_multipole_w.cc
-#	meas/inline/hadron/inline_spectrumQll.cc
+#meas / inline / hadron / inline_spectrum_w.cc
+#meas / inline / hadron / inline_multipole_w.cc
+#meas / inline / hadron / inline_spectrumQll.cc
 
 ########################################################
-#  Staggered Sources
+#Staggered Sources
 ########################################################
 target_sources(chromalib PRIVATE 
 	actions/ferm/fermacts/fermacts_aggregate_s.cc 
@@ -1893,11 +1893,11 @@ target_sources(chromalib PRIVATE
 	util/gauge/stag_phases_s.cc
 )
 
-#	actions/ferm/fermacts/stag_fermact_s.cc
-#	meas/pbp/mespbp_s.cc meas/pbp/stagpbp_s.cc
+#actions / ferm / fermacts / stag_fermact_s.cc
+#meas / pbp / mespbp_s.cc meas / pbp / stagpbp_s.cc
 
 ###############################################
-# Conditional Additions: GMP
+#Conditional Additions : GMP
 ###############################################
 if ( GMP_FOUND )
   target_link_libraries(chromalib PUBLIC GMP::gmp )
@@ -1906,7 +1906,7 @@ if ( GMP_FOUND )
 endif()
 
 ################################################
-# CPPWilsonDslash
+#CPPWilsonDslash
 ################################################
 if( Chroma_ENABLE_CPP_WILSON_DSLASH )
   list(APPEND ChromaLIB_HEADERS 
@@ -1921,7 +1921,7 @@ if( Chroma_ENABLE_CPP_WILSON_DSLASH )
 endif()
 
 #######################################################
-# JIT CLOVER/STOUTING
+#JIT CLOVER / STOUTING
 #######################################################
 if( Chroma_ENABLE_JIT_CLOVER )
   list(APPEND ChromaLIB_HEADERS actions/ferm/linop/clover_term_jit_w.h)
@@ -1932,7 +1932,7 @@ endif()
 
 
 ########################################################
-#  QUDA
+#QUDA
 ########################################################
 if( Chroma_ENABLE_QUDA ) 
     list(APPEND ChromaLIB_HEADERS 
@@ -1990,10 +1990,10 @@ target_sources(chromalib PRIVATE
 )
 
 if( QUDA_TARGET_HIP )
-  # QUDA injects an unnecessary dependency to hip::device through roc::rocprim_hip.
-  # The inclusion of hip::device adds flags for hipcc, forcing chroma to use hipcc.
-  # Being not sure how to avoid QUDA injecting the hip::device dependency, the easiest
-  # solution (hack) is to empty of content hip::device.
+#QUDA injects an unnecessary dependency to hip::device through roc::rocprim_hip.
+#The inclusion of hip::device adds flags for hipcc, forcing chroma to use hipcc.
+#Being not sure how to avoid QUDA injecting the hip::device dependency, the easiest
+#solution(hack) is to empty of content hip::device.
   set_target_properties(hip::device PROPERTIES INTERFACE_COMPILE_OPTIONS ""
                                              INTERFACE_LINK_LIBRARIES "")
 endif()
@@ -2002,7 +2002,7 @@ target_link_libraries(chromalib PUBLIC QUDA::quda)
 endif()
 
 ################################################
-# Superbblas
+#Superbblas
 ################################################
 if( Chroma_ENABLE_SUPERBBLAS )
   list(APPEND ChromaLIB_HEADERS 
@@ -2072,13 +2072,17 @@ if( Chroma_ENABLE_SUPERLU_DIST )
   if( SUPERLU_DIST_ROOT )
     set(_old_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
     if( _old_pkg_config_path )
-      set(ENV{PKG_CONFIG_PATH} "${SUPERLU_DIST_ROOT}/lib/pkgconfig:${_old_pkg_config_path}")
+      set(ENV{
+  PKG_CONFIG_PATH} "${SUPERLU_DIST_ROOT}/lib/pkgconfig:${_old_pkg_config_path}")
     else()
-      set(ENV{PKG_CONFIG_PATH} "${SUPERLU_DIST_ROOT}/lib/pkgconfig")
+      set(ENV{
+  PKG_CONFIG_PATH} "${SUPERLU_DIST_ROOT}/lib/pkgconfig")
     endif()
   endif()
   pkg_check_modules(SUPERLU_DIST REQUIRED IMPORTED_TARGET superlu_dist)
   target_link_libraries(chromalib PUBLIC PkgConfig::SUPERLU_DIST)
+  target_link_libraries(chromalib PUBLIC ${SUPERLU_DIST_STATIC_LDFLAGS_OTHER} ${SUPERLU_DIST_STATIC_LIBRARIES})
+  target_link_directories(chromalib PUBLIC ${SUPERLU_DIST_STATIC_LIBRARY_DIRS})
 endif()
 
 
@@ -2088,11 +2092,11 @@ if( Chroma_SANITIZER_OPTS )
 endif()
 
 ################################################
-# A yucky way to install because the install
-# only supports directories as a destination
-# So for each of the includes I need to get the
-# Directory first 
-# and install to that
+#A yucky way to install because the install
+#only supports directories as a destination
+#So for each of the includes I need to get the
+#Directory first
+#and install to that
 ################################################
 foreach( file ${ChromaLIB_HEADERS}) 
   get_filename_component(basedir ${file} DIRECTORY)
@@ -2108,8 +2112,8 @@ set_target_properties( chromalib PROPERTIES CXX_STANDARD ${Chroma_CXX_STANDARD} 
 set_target_properties( chromalib PROPERTIES CXX_EXTENSIONS OFF )
  
 ##############################################
-# Install the library and the targets
-# into the export for the targets
+#Install the library and the targets
+#into the export for the targets
 ##############################################
 install(TARGETS chromalib EXPORT ChromaTargets
   ARCHIVE DESTINATION lib

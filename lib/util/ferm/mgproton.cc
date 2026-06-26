@@ -4348,7 +4348,33 @@ namespace Chroma
 	options.IterRefine = overrides.iter_refine;
 	options.PrintStat = overrides.print_stat ? YES : NO;
 	if (overrides.has_ilu_level)
+	{
 	  options.ILU_level = overrides.ilu_level;
+	  if (overrides.ilu_level == 0)
+	  {
+	    /* Build per-site dense supernodes for ILU(0). ilu_level_symbfact()
+	       operates on the column-permuted matrix (GAC) and ignores perm_c, so
+	       a user-supplied block partition is only valid when the column
+	       ordering is left untouched. Force NATURAL column ordering and disable
+	       row permutation / equilibration so each lattice site stays a
+	       contiguous dense block (bs x bs), enabling BLAS3 / GPU GEMM. The
+	       partition itself is installed in SuperLUSolverState::initialize(). */
+	    options.UserDefineSupernode = YES;
+	    options.ColPerm = NATURAL;
+	    options.RowPerm = NOROWPERM;
+	    options.Equil = NO;
+	  }
+	}
+      }
+
+      inline void applySuperLUAccOffloadEnvOverride(superlu_dist_options_t& options)
+      {
+	const char* env = std::getenv("SB_SUPERLU_ACC_OFFLOAD");
+	if (!env)
+	  env = std::getenv("CHROMA_SUPERLU_ACC_OFFLOAD");
+	if (env)
+	  options.superlu_acc_offload =
+	    parseSuperLUEnvFlag(env, options.superlu_acc_offload != 0) ? 1 : 0;
       }
 
       inline int getSuperLUTimingLevel()
@@ -4418,7 +4444,8 @@ namespace Chroma
 				      int_t nnz_loc, const std::vector<double>& chroma_times,
 				      const SuperLUStat_t& stat, std::size_t solve_call,
 				      fact_t solve_fact, const void* lu_struct,
-				      const void* llu_struct)
+				      const void* llu_struct,
+				      const superlu_dist_options_t& options)
       {
 	if (timing_level <= 0)
 	  return;
@@ -4469,12 +4496,21 @@ namespace Chroma
 	if (comm_rank != 0 || (local_superlu && Layout::nodeNumber() != 0))
 	  return;
 
+	const int acc_offload_effective =
+	  get_acc_offload(const_cast<superlu_dist_options_t*>(&options));
+
 	std::ostringstream summary;
 	summary << prefix << " SuperLU_DIST timing solve=" << solve_call
 		<< " fact=" << superLUFactName(solve_fact) << " LUstruct=" << lu_struct
 		<< " Llu=" << llu_struct << " nrhs=" << nrhs << " n=" << (long long)dims_max[0]
 		<< " max_m_loc=" << (long long)dims_max[1]
-		<< " max_nnz_loc=" << (long long)dims_max[2] << " ranks=" << comm_size << " max:";
+		<< " max_nnz_loc=" << (long long)dims_max[2] << " ranks=" << comm_size
+		<< " api_rhs=host_vector"
+		<< " acc_offload_option=" << options.superlu_acc_offload
+		<< " acc_offload_effective=" << acc_offload_effective
+		<< " gpu_streams=" << options.superlu_num_gpu_streams
+		<< " gpu_max_buffer=" << (long long)options.superlu_max_buffer_size
+		<< " gpu_n_gemm=" << options.superlu_n_gemm << " max:";
 	for (int i = 0; i < chroma_count; ++i)
 	  appendTimingField(summary, chroma_names[i], chroma_max[(std::size_t)i]);
 	QDPIO::cout << summary.str() << std::endl;
@@ -4645,6 +4681,8 @@ namespace Chroma
 	int_t fst_row = 0;
 	int_t m_loc = 0;
 	int_t nnz_loc = 0;
+	int_t bs = 1; /* dense block size (color*spin*... from the operator); used to
+			 build the user-defined supernode partition for ILU(0) */
 	std::vector<int_t> rowptr;
 	std::vector<int_t> colind;
 	std::vector<doublecomplex> nzval;
@@ -4699,6 +4737,7 @@ namespace Chroma
 	{
 	  set_default_options_dist(&options);
 	  applySuperLUOptionOverrides(overrides, options);
+	  applySuperLUAccOffloadEnvOverride(options);
 	  first_fact = options.Fact;
 	}
 
@@ -4755,6 +4794,46 @@ namespace Chroma
 	  scaleperm_init = true;
 	  zLUstructInit(setup.n, &LUstruct);
 	  lu_init = true;
+
+	  /* For ILU(0) we install a user-defined supernode partition where each
+	     lattice site (bs = color*spin*... dense dofs, derived from the
+	     operator/gauge) forms one dense supernode. The dense block dofs are the
+	     fastest-varying part of the global column index, so each site occupies
+	     a contiguous range [s*bs, (s+1)*bs); thus supno[i] = i/bs and
+	     xsup[s] = s*bs. This restores BLAS3 / GPU GEMM that singleton
+	     supernodes (the SuperLU default for ILU(0)) destroy. The arrays are
+	     freed by zDestroy_LU(); see applySuperLUOptionOverrides() which also
+	     forces NATURAL column ordering so this partition stays valid. */
+	  if (options.UserDefineSupernode == YES)
+	  {
+	    const int_t bs = setup.bs > 0 ? setup.bs : 1;
+	    if (setup.n % bs != 0)
+	      throw std::runtime_error(
+		prefix + ": cannot build supernode partition; matrix order " +
+		std::to_string((long long)setup.n) + " is not a multiple of block size " +
+		std::to_string((long long)bs));
+	    const int_t nsuper = setup.n / bs;
+	    /* SuperLU requires supno[] of length n and xsup[] of length n+1 (the
+	       worst case of n singleton supernodes); several routines, including
+	       DEBUGlevel dumps, index xsup up to n regardless of the actual
+	       supernode count. Allocating only nsuper+1 corrupts the heap. Match
+	       the allocation SuperLU itself uses (see ilu_level_symbfact.c). */
+	    int_t* supno = intMalloc_dist(setup.n);
+	    int_t* xsup = intMalloc_dist(setup.n + 1);
+	    if (!supno || !xsup)
+	      throw std::runtime_error(prefix + ": malloc failed for supernode partition");
+	    for (int_t i = 0; i < setup.n; ++i)
+	      supno[i] = i / bs;
+	    for (int_t s = 0; s < nsuper; ++s)
+	      xsup[s] = s * bs;
+	    xsup[nsuper] = setup.n;
+	    LUstruct.Glu_persist->supno = supno;
+	    LUstruct.Glu_persist->xsup = xsup;
+	    detail::log(1, prefix + " ILU(0) user supernodes: nsuper=" +
+				 std::to_string((long long)nsuper) + " bs=" +
+				 std::to_string((long long)bs));
+	  }
+
 	  initialized = true;
 	}
 
@@ -4796,7 +4875,8 @@ namespace Chroma
       template <std::size_t NOp>
       SuperLUMatrixSetup<NOp>
       buildSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
-			      const std::string& prefix, MPI_Comm superlu_comm)
+			      const std::string& prefix, MPI_Comm superlu_comm,
+			      bool dense_blocks)
       {
 	SuperLUMatrixSetup<NOp> setup;
 	const auto img_dims = kvcoors<NOp>(local_blocks.sp.i.order, local_blocks.sp.i.kvdim());
@@ -4815,6 +4895,7 @@ namespace Chroma
 	setup.n = global_cols;
 	setup.fst_row = partition.fst_row;
 	setup.m_loc = partition.m_loc;
+	setup.bs = (int_t)local_blocks.bs;
 
 	std::vector<std::vector<SuperLUScalarRowRef<NOp>>> rows_by_peer(
 	  (std::size_t)partition.world);
@@ -4922,7 +5003,12 @@ namespace Chroma
 	      for (std::size_t dense_c = 0; dense_c < local_blocks.bs; ++dense_c)
 	      {
 		const ComplexD value = block_entry.data[dense_r * local_blocks.bs + dense_c];
-		if (value == ComplexD{})
+		/* For user-defined supernodes (ILU(0)) keep the full dense bs x bs
+		   block so every column in a supernode shares the same row pattern;
+		   ilu_level_symbfact() derives that pattern from the first column
+		   only. Dropping intra-block zeros makes nsupr < nsupc and crashes
+		   pzgstrf with an illegal LDA in ZGERU. */
+		if (!dense_blocks && value == ComplexD{})
 		  continue;
 
 		int_t global_col =
@@ -5017,7 +5103,8 @@ namespace Chroma
       SuperLUMatrixSetup<NOp>
       buildLocalSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
 				   const Tensor<NOp, ComplexD>& img,
-				   const Tensor<NOp, ComplexD>& dom, const std::string& prefix)
+				   const Tensor<NOp, ComplexD>& dom, const std::string& prefix,
+				   bool dense_blocks)
       {
 	SuperLUMatrixSetup<NOp> setup;
 	const Coor<NOp> zero{{}};
@@ -5036,6 +5123,7 @@ namespace Chroma
 	  throw std::runtime_error("SuperLU_DIST: local DD solve requires square local blocks");
 	setup.fst_row = 0;
 	setup.m_loc = setup.m;
+	setup.bs = (int_t)local_blocks.bs;
 
 	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
 	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
@@ -5115,7 +5203,12 @@ namespace Chroma
 	      for (std::size_t dense_c = 0; dense_c < local_blocks.bs; ++dense_c)
 	      {
 		const ComplexD value = block_entry.data[dense_r * local_blocks.bs + dense_c];
-		if (value == ComplexD{})
+		/* For user-defined supernodes (ILU(0)) keep the full dense bs x bs
+		   block so every column in a supernode shares the same row pattern;
+		   ilu_level_symbfact() derives that pattern from the first column
+		   only. Dropping intra-block zeros makes nsupr < nsupc and crashes
+		   pzgstrf with an illegal LDA in ZGERU. */
+		if (!dense_blocks && value == ComplexD{})
 		  continue;
 
 		Coor<NOp> local_col{{}};
@@ -5263,9 +5356,12 @@ namespace Chroma
 	// operator view. Forcing `sp.getLocal()` reindexes the row anchors differently from the RHS
 	// tensor layout and produces out-of-bounds local row offsets on multi-rank DD solves.
 	auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST");
+	/* ILU(0) installs per-site dense supernodes, which require the full
+	   bs x bs blocks to be stored (no intra-block zero dropping). */
+	const bool dense_blocks = superlu_options.has_ilu_level && superlu_options.ilu_level == 0;
 	auto setup = std::make_shared<SuperLUMatrixSetup<NOp>>(
-	  local_superlu ? buildLocalSuperLUMatrixSetup(local_blocks, op.i, op.d, prefix)
-			: buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm));
+	  local_superlu ? buildLocalSuperLUMatrixSetup(local_blocks, op.i, op.d, prefix, dense_blocks)
+			: buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm, dense_blocks));
 	auto superlu_state = std::make_shared<SuperLUSolverState<NOp>>(
 	  prefix, superlu_comm, nprow, npcol, npdep, superlu_options);
 
@@ -5496,7 +5592,8 @@ namespace Chroma
 				  setup->n, setup->m_loc, setup->nnz_loc, chroma_times,
 				  stat_scope.stat, solve_call, solve_fact,
 				  static_cast<const void*>(&superlu_state->LUstruct),
-				  static_cast<const void*>(superlu_state->LUstruct.Llu));
+				  static_cast<const void*>(superlu_state->LUstruct.Llu),
+				  superlu_state->options);
 	    }
 	  },
 	  op.i,

@@ -44,6 +44,9 @@ foreach( EXEC ${ChromaMain_EXECUTABLES})
   endif()
   
   target_link_libraries( ${EXEC} PUBLIC Chroma::chromalib )
+  if( Chroma_ENABLE_SUPERLU_DIST AND Chroma_SUPERLU_EXEC_LINK_LIBS )
+    target_link_libraries( ${EXEC} PUBLIC ${Chroma_SUPERLU_EXEC_LINK_LIBS} )
+  endif()
 endforeach()
 
 INSTALL( TARGETS hmc const_hmc chroma purgaug cfgtransf 

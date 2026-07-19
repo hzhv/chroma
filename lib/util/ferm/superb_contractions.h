@@ -31,6 +31,7 @@
 #  include <cstdlib>
 #  include <cstring>
 #  include <iomanip>
+#  include <iostream>
 #  include <map>
 #  include <memory>
 #  include <random>
@@ -39,6 +40,11 @@
 #  include <stdexcept>
 #  include <string>
 #  include <type_traits>
+
+#  if defined(SUPERBBLAS_USE_CUDA)
+#    include <cuda.h>
+#    include <cuda_runtime.h>
+#  endif
 
 #  ifndef M_PI
 #    define M_PI                                                                                   \
@@ -869,6 +875,31 @@ namespace Chroma
 	return cpuctx;
       }
 
+      inline bool sparseTensorCtxProbeEnabled()
+      {
+	static const bool enabled = []() {
+	  const char* env = std::getenv("SB_SUPERLU_CTX_PROBE");
+	  return env && std::atoi(env) != 0;
+	}();
+	return enabled;
+      }
+
+      inline void sparseTensorCtxProbe(const char* tag)
+      {
+	if (!sparseTensorCtxProbeEnabled())
+	  return;
+	std::cerr << "SLUSTAGE[" << Layout::nodeNumber() << "] " << tag;
+#  if defined(SUPERBBLAS_USE_CUDA)
+	CUcontext cur = nullptr;
+	CUresult cres = cuCtxGetCurrent(&cur);
+	int dev = -1;
+	cudaError_t derr = cudaGetDevice(&dev);
+	std::cerr << " ctx=" << (void*)cur << "(cu=" << (int)cres << ") dev=" << dev << "("
+		  << cudaGetErrorName(derr) << ")";
+#  endif
+	std::cerr << std::endl;
+      }
+
       // Return a context on either the host or the device
       inline std::shared_ptr<superbblas::Context>& getGpuContext()
       {
@@ -1126,7 +1157,7 @@ namespace Chroma
 	  }
 	  else if (dist == Glocal)
 	  {
-	    p = all_tensor_glocal(dim);
+	    p = all_tensor_glocal(order, dim);
 	  }
 	  else if (dist.size() > OnEveryoneCompact.size() &&
 		   dist.substr(0, OnEveryoneCompact.size()) == OnEveryoneCompact)
@@ -1565,14 +1596,21 @@ namespace Chroma
 	}
 
 	/// Return a partitioning where only the current node has support for the tensor
+	/// \param order: dimension labels (use x, y, z, t for lattice dimensions)
 	/// \param dim: dimension size for the tensor
 
-	static PartitionStored all_tensor_glocal(Coor<N> dim)
+	static PartitionStored all_tensor_glocal(const std::string& order, Coor<N> dim)
 	{
-	  int nprocs = Layout::numNodes();
-	  // Set the first coordinate of the tensor supported on each prop to zero and the size
-	  PartitionStored fs(nprocs);
-	  fs[Layout::nodeNumber()][1] = dim;
+	  // Each process stores ONLY its natural distributed (lattice) slice while the tensor
+	  // keeps its global `dim`, mirroring `get_glocal_partition`.  Previously this stored
+	  // the whole `dim` on every process, which over-allocated the full global tensor per
+	  // rank on multi-process runs (e.g. the domain-decomposition SuperLU operator: each
+	  // GPU tried to materialize the global sparse operator instead of its subgrid).
+	  // For tensors without lattice labels, `partitioning_distributed` assigns no procs to
+	  // the absent x/y/z/t labels, so the local slice is the whole (small) `dim` as before.
+	  PartitionStored full = partitioning_distributed(order, dim, OnEveryone);
+	  PartitionStored fs(Layout::numNodes());
+	  fs[Layout::nodeNumber()] = full[Layout::nodeNumber()];
 	  return fs;
 	}
 
@@ -2614,7 +2652,19 @@ namespace Chroma
 	if (is_eg())
 	  throw std::runtime_error("Invalid operation from an example tensor");
 
-	auto t = isSubtensor() ? cloneOn(OnHost) : make_sure(none, OnHost);
+	// See transformWithCPUFunWithCoor: copying a Glocal tensor to host via cloneOn/make_sure
+	// hits superbblas' broken Glocal redistribution (invalid device ordinal).  Build the
+	// Glocal host copy from a purely local copy of this rank's slice instead.
+	Tensor<N, T> t;
+	if (dist == Glocal)
+	{
+	  t = this->template make_compatible<N, T>(none, {}, OnHost);
+	  getLocal().copyTo(t.getLocal());
+	}
+	else
+	{
+	  t = isSubtensor() ? cloneOn(OnHost) : make_sure(none, OnHost);
+	}
 	auto r = t.template make_compatible<N, Tr>();
 	assert(!r.isSubtensor() && !t.isSubtensor());
 	std::size_t vol = t.getLocal().volume();
@@ -2650,7 +2700,25 @@ namespace Chroma
 
 	using superbblas::detail::operator+;
 
-	auto t = isSubtensor() ? cloneOn(OnHost) : make_sure(none, OnHost);
+	// A Glocal tensor stores global dims but only this rank's subgrid slice at a non-zero
+	// global offset.  Routing its device->host copy through `cloneOn`/`make_sure` goes down
+	// superbblas' incomplete Glocal redistribution path, which references the wrong CUDA
+	// device and aborts a CUB transform with `cudaErrorInvalidDevice: invalid device ordinal`
+	// (seen building the DD/SuperLU local operator on multi-rank runs).  Produce the same
+	// Glocal host copy the crashing `cloneOn` intended, but fill it with a purely local
+	// (offset-free, MPI_COMM_SELF) copy of this rank's slice.  `t` remains Glocal, so the
+	// global-coordinate computation below (`t.p->localFrom()`) and the Glocal distribution of
+	// the result `r` (which callers require to match `ii`/`data`) are both preserved.
+	Tensor<N, T> t;
+	if (dist == Glocal)
+	{
+	  t = this->template make_compatible<N, T>(none, {}, OnHost);
+	  getLocal().copyTo(t.getLocal());
+	}
+	else
+	{
+	  t = isSubtensor() ? cloneOn(OnHost) : make_sure(none, OnHost);
+	}
 	auto r = t.template make_compatible<N, Tr>();
 	assert(!r.isSubtensor() && !t.isSubtensor());
 	std::size_t vol = t.getLocal().volume();
@@ -4719,6 +4787,67 @@ namespace Chroma
 	  w_mask_mu = w_mask_mu.kvslice_from_size(to, {});
 	  mask_mu.copyTo(v_mask_mu);
 	  mask_mu.copyTo(w_mask_mu);
+
+	  if (std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
+	      std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
+	  {
+	    auto mask_stats = [](const auto& mask) {
+	      auto host = mask.getLocal().make_sure(none, OnHost);
+	      std::pair<std::size_t, std::size_t> stats{0, 0};
+	      if (!host)
+		return stats;
+	      const auto* ptr = host.data();
+	      stats.second = host.volume();
+	      for (std::size_t k = 0; k < stats.second; ++k)
+		stats.first += ptr[k] != 0 ? 1 : 0;
+	      return stats;
+	    };
+	    auto view_shape = [](const auto& tensor) {
+	      std::ostringstream os;
+	      os << tensor.order << " dim=(";
+	      for (std::size_t k = 0; k < tensor.order.size(); ++k)
+	      {
+		if (k != 0)
+		  os << ',';
+		os << tensor.dim[k];
+	      }
+	      os << ") from=(";
+	      for (std::size_t k = 0; k < tensor.order.size(); ++k)
+	      {
+		if (k != 0)
+		  os << ',';
+		os << tensor.from[k];
+	      }
+	      os << ") size=(";
+	      for (std::size_t k = 0; k < tensor.order.size(); ++k)
+	      {
+		if (k != 0)
+		  os << ',';
+		os << tensor.size[k];
+	      }
+	      os << ')';
+	      return os.str();
+	    };
+
+	    const auto mask_count = mask_stats(mask_mu);
+	    const auto src_count = mask_stats(v_mask_mu);
+	    const auto dst_count = mask_stats(w_mask_mu);
+	    std::ostringstream dir_string;
+	    dir_string << '(';
+	    for (std::size_t k = 0; k < dir.size(); ++k)
+	    {
+	      if (k != 0)
+		dir_string << ',';
+	      dir_string << dir[k];
+	    }
+	    dir_string << ')';
+	    std::cout << "SBMASK[" << Layout::nodeNumber() << "] mu=" << mu << " x=" << x
+		      << " dir=" << dir_string.str() << " mask=" << mask_count.first << '/'
+		      << mask_count.second << " src=" << src_count.first << '/' << src_count.second
+		      << " dst=" << dst_count.first << '/' << dst_count.second << " mask_view={"
+		      << view_shape(mask_mu) << "} src_view={" << view_shape(v_mask_mu)
+		      << "} dst_view={" << view_shape(w_mask_mu) << '}' << std::endl;
+	  }
 	  v.kvslice_from_size(to, {}).copyToWithMask(w_mu.kvslice_from_size(to, {}), v_mask_mu,
 						     w_mask_mu);
 	} // x
@@ -5861,6 +5990,7 @@ namespace Chroma
       /// Construct the sparse operator
       void construct()
       {
+	detail::sparseTensorCtxProbe("construct-enter");
 	if ((ii.dist != OnEveryone && ii.dist != OnEveryoneAsChroma && ii.dist != Local &&
 	     ii.dist != Glocal) ||
 	    ii.dist != jj.dist || ii.dist != data.dist ||
@@ -5870,6 +6000,7 @@ namespace Chroma
 	  // Superbblas needs the column coordinates to be local
 #  if SUPERBBLAS_VERSION < 3
 	// Remove the local domain coordinates to jj
+	detail::sparseTensorCtxProbe("before-localjj");
 	const auto new_d = d.extend_support(domain_extension);
 	const auto d_partition = new_d.p->p;
 	const auto localFrom = new_d.p->localFrom();
@@ -5878,6 +6009,7 @@ namespace Chroma
 	  jj.template transformWithCPUFunWithCoor<int>([&](const Coor<NI + 2>& c, const int& t) {
 	    return (t - localFrom[c[0]] + domDim[c[0]]) % domDim[c[0]];
 	  });
+	detail::sparseTensorCtxProbe("after-localjj");
 #  else
 	auto localjj = jj;
 	const auto d_partition =
@@ -5899,32 +6031,47 @@ namespace Chroma
 	  throw std::runtime_error("Ups! Look into this");
 	const value_type* ptr = data.data();
 	const value_type* kron_ptr = kron.data();
-	MPI_Comm comm = (ii.dist == Local ? MPI_COMM_SELF : MPI_COMM_WORLD);
+	// A Glocal sparse tensor is applied per-rank (bsr_krylov gets just_local=true in
+	// contractWith), so it must also be BUILT per-rank on MPI_COMM_SELF -- exactly like
+	// set_zero()/copyTo().  The partition arrays still hold one entry per world rank, so
+	// advance the pointers to THIS rank's entry; otherwise the single COMM_SELF process
+	// reads partition[0], which is empty on ranks whose subgrid does not start at the
+	// lattice origin, yielding a zero operator there.  Non-Glocal paths are unchanged.
+	const bool is_glocal = (ii.dist == Glocal);
+	MPI_Comm comm = (ii.dist == Local || is_glocal ? MPI_COMM_SELF : MPI_COMM_WORLD);
+	const std::size_t dom_ncomp = d_partition.size() / d.p->p.size();
+	const std::size_t img_disp = is_glocal ? (std::size_t)i.p->MpiProcRank() : 0;
+	const std::size_t dom_disp = is_glocal ? (std::size_t)d.p->MpiProcRank() * dom_ncomp : 0;
 	superbblas::BSR_handle* bsr = nullptr;
 	if (nkrond == 0 && nkroni == 0)
 	{
+	  detail::sparseTensorCtxProbe("before-create-bsr");
 	  superbblas::create_bsr<ND, NI, value_type>(
-	    i.p->p.data(), i.dim,
+	    i.p->p.data() + img_disp, i.dim,
 #  if SUPERBBLAS_VERSION >= 3
 	    1,
 #  endif
-	    d_partition.data(), d.dim, d_partition.size() / d.p->p.size(), blki, blkd,
+	    d_partition.data() + dom_disp, d.dim, dom_ncomp, blki, blkd,
 	    isImgFastInBlock, &iiptr, &jjptr, &ptr, &data.ctx(), comm, superbblas::FastToSlow,
 	    &bsr);
+	  detail::sparseTensorCtxProbe("after-create-bsr");
 	}
 	else
 	{
+	  detail::sparseTensorCtxProbe("before-create-kron-bsr");
 	  superbblas::create_kron_bsr<ND, NI, value_type>(
-	    i.p->p.data(), i.dim,
+	    i.p->p.data() + img_disp, i.dim,
 #  if SUPERBBLAS_VERSION >= 3
 	    1,
 #  endif
-	    d_partition.data(), d.dim, d_partition.size() / d.p->p.size(), blki, blkd, kroni, krond,
+	    d_partition.data() + dom_disp, d.dim, dom_ncomp, blki, blkd, kroni, krond,
 	    isImgFastInBlock, &iiptr, &jjptr, &ptr, &kron_ptr, &data.ctx(), comm,
 	    superbblas::FastToSlow, &bsr);
+	  detail::sparseTensorCtxProbe("after-create-kron-bsr");
 	}
 	handle = std::shared_ptr<superbblas::BSR_handle>(
 	  bsr, [=](superbblas::BSR_handle* bsr) { destroy_bsr(bsr); });
+	detail::sparseTensorCtxProbe("construct-exit");
       }
 
       /// Return a local support of the tensor
@@ -6924,13 +7071,17 @@ namespace Chroma
 	value_type* w_ptr = w.data_for_writing();
 	std::string orderv = detail::update_order_and_check<Nv>(v.order, mv);
 	std::string orderw = detail::update_order_and_check<Nw>(w.order, mw);
+	// Glocal BSR handles are constructed per rank, so validate/apply them per rank too.
+	MPI_Comm comm = (v.dist == Local || v.dist == Glocal) ? MPI_COMM_SELF : MPI_COMM_WORLD;
+	const std::size_t v_p_disp = v.dist == Glocal ? (std::size_t)v.p->MpiProcRank() : 0;
+	const std::size_t w_p_disp = w.dist == Glocal ? (std::size_t)w.p->MpiProcRank() : 0;
 	superbblas::bsr_krylov<ND, NI, Nv, Nw, value_type>(
 	  scalar * v.scalar / w.scalar, handle.get(), i.order.c_str(), d.order.c_str(),	       //
-	  v.p->p.data(), 1, orderv.c_str(), v.from, v.size, v.dim, (const value_type**)&v_ptr, //
-	  T{0}, w.p->p.data(), orderw.c_str(), w.from, w.size, w.dim, power_label,
+	  v.p->p.data() + v_p_disp, 1, orderv.c_str(), v.from, v.size, v.dim,
+	  (const value_type**)&v_ptr, //
+	  T{0}, w.p->p.data() + w_p_disp, orderw.c_str(), w.from, w.size, w.dim, power_label,
 	  (value_type**)&w_ptr, //
-	  &data.ctx(), v.dist == Local ? MPI_COMM_SELF : MPI_COMM_WORLD, superbblas::FastToSlow,
-	  nullptr, v.dist == Glocal);
+	  &data.ctx(), comm, superbblas::FastToSlow, nullptr, v.dist == Glocal);
 
 	// Force synchronization in superbblas stream if the destination allocation isn't managed by superbblas
 	if (!v.is_managed() || !w.is_managed())
@@ -7735,8 +7886,23 @@ namespace Chroma
       {
 	return fop ? Operator<NOp, COMPLEX>{fop, d.getGlocal(), i.getGlocal(), fop_tconj, *this}
 		   : Operator<NOp, COMPLEX>{
-		       sp,	rd,	   max_power, d.getGlocal(), i.getGlocal(),
-		       order_t, domLayout, imgLayout, neighbors,     preferred_col_ordering};
+		       sp.getGlocal(), rd,	  max_power, d.getGlocal(), i.getGlocal(),
+		       order_t,	       domLayout, imgLayout, neighbors,     preferred_col_ordering};
+      }
+
+      /// Return the operator restricted to this process' local support as a genuinely
+      /// *local* operator: the domain/image tensors (and the sparse tensor) carry the
+      /// subgrid dimensions with the local origin at zero (dist == Local, MPI_COMM_SELF),
+      /// rather than global dimensions with a per-rank offset (Glocal).  The domain
+      /// decomposition preconditioner uses this so the per-rank operator construction
+      /// (clone/probing) runs entirely in the offset-free local frame, which every
+      /// superbblas op supports, avoiding the incomplete-Glocal-offset code paths.
+      Operator<NOp, COMPLEX> getLocal() const
+      {
+	return fop ? Operator<NOp, COMPLEX>{fop, d.getLocal(), i.getLocal(), fop_tconj, *this}
+		   : Operator<NOp, COMPLEX>{
+		       sp.getLocal(), rd,	 max_power, d.getLocal(), i.getLocal(),
+		       order_t,	      domLayout, imgLayout, neighbors,     preferred_col_ordering};
       }
 
       /// Return whether the operator is not empty
@@ -8327,7 +8493,12 @@ namespace Chroma
 	{
 	  if (dim.at('X') != 1)
 	    throw std::runtime_error("getXOddityMask: invalid dimension size `X`");
-	  r.set(xoddity == 0 ? float{1} : float{0});
+	  // In EvensOnlyLayout the X/parity coordinate is suppressed, but natural x
+	  // parity still varies with y+z+t.  Keep the mask in Xxyzt order, matching
+	  // the other layout branches and the masked-copy path that consumes it.
+	  r.fillCpuFunCoor([&](const Coor<5>& coor) {
+	    return (coor[2] + coor[3] + coor[4]) % 2 == xoddity ? float{1} : float{0};
+	  });
 	}
 	else
 	  throw std::runtime_error("getXOddityMask: unsupported layout");
@@ -8802,6 +8973,7 @@ namespace Chroma
 
 	// Extract the nonzeros with probing
 	sop.data.set_zero(); // all values may not be populated when using blocking
+	bool _sb_probed = false; // DEBUG PROBE (SB_SUPERLU_CTX_PROBE), remove when fixed
 	for (unsigned int color = 0; color < num_colors; ++color)
 	{
 	  // Generate the proving vectors for the given color
@@ -8824,8 +8996,32 @@ namespace Chroma
 	    auto probs =
 	      contract<NOp + Nblk>(t_l, t_blk.kvslice_from_size(colorFrom, colorSize), "");
 
+	    // DEBUG PROBE (SB_SUPERLU_CTX_PROBE): per-rank L1 norm of the probing input,
+	    // the operator matvec, and (below) the populated sparse data, to locate where
+	    // the DD-local operator values vanish on ranks with a non-zero subgrid offset.
+	    // Uses getLocal()+host sum (fnorm() itself is not Glocal-safe).  Remove when fixed.
+	    const bool _sb_do_probe = !_sb_probed && std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
+				      std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0;
+	    auto _sb_l1 = [](const auto& t) -> double {
+	      auto h = t.getLocal().make_sure(none, OnHost);
+	      const auto* p = h.data();
+	      std::size_t n = h.volume();
+	      double s = 0;
+	      for (std::size_t k = 0; k < n; ++k)
+		s += std::abs(std::real(p[k])) + std::abs(std::imag(p[k]));
+	      return s;
+	    };
+	    const double _sb_probs_n = _sb_do_probe ? _sb_l1(probs) : 0.0;
+
 	    // Compute the matvecs
 	    auto mv = op(std::move(probs));
+
+	    if (_sb_do_probe)
+	    {
+	      std::cout << "SLUCLONE[" << Layout::nodeNumber() << "] color=" << color
+			<< " probs_l1=" << _sb_probs_n << " mv_l1=" << _sb_l1(mv) << std::endl;
+	      _sb_probed = true;
+	    }
 
 	    // Construct an indicator tensor where all blocking dimensions but
 	    // only the nodes colored `color` are copied
@@ -8860,6 +9056,21 @@ namespace Chroma
 	  }
 	}
 
+	// DEBUG PROBE (SB_SUPERLU_CTX_PROBE): per-rank L1 norm of the populated sparse data
+	// after the masked-copy fill.  If mv_l1>0 (above) but this is 0 on offset ranks, the
+	// masked copy is the Glocal gap; if both are 0, the operator apply is.  Remove when fixed.
+	if (std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
+	    std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
+	{
+	  auto _h = sop.data.getLocal().make_sure(none, OnHost);
+	  const auto* _p = _h.data();
+	  std::size_t _n = _h.volume();
+	  double _s = 0;
+	  for (std::size_t _k = 0; _k < _n; ++_k)
+	    _s += std::abs(std::real(_p[_k])) + std::abs(std::imag(_p[_k]));
+	  std::cout << "SLUDATA[" << Layout::nodeNumber() << "] sop_data_l1=" << _s << std::endl;
+	}
+
 	// Populate the coordinate of the columns, that is, to give the domain coordinates of first nonzero in each
 	// BSR nonzero block. Assume that we are processing nonzeros block for the image coordinate `c` on the
 	// direction `dir`, that is, the domain coordinates will be (cx-dirx,cy-diry,cz-dirz,dt-dirt) in natural
@@ -8870,6 +9081,7 @@ namespace Chroma
 
 	Coor<Nd> real_dims = kvcoors<Nd>("xyzt", getNatLatticeDims(i.kvdim(), op.imgLayout));
 	int d = op.imgLayout == XEvenOddLayoutZeroOdd ? 1 : 0;
+	sparseTensorCtxProbe("before-jj-fill");
 	sop.jj.fillCpuFunCoor([&](const Coor<NOp + 2>& c) {
 	  // c has order '~u%xyztX' where xyztX were remapped by ri
 	  int domi = c[0];	  // the domain label to evaluate, label ~
@@ -8898,9 +9110,12 @@ namespace Chroma
 	  int latd = domi - Nblk;
 	  return (base - dir[latd] + real_dims[latd]) % real_dims[latd];
 	});
+	sparseTensorCtxProbe("after-jj-fill");
 
 	// Construct the sparse operator
+	sparseTensorCtxProbe("before-construct");
 	sop.construct();
+	sparseTensorCtxProbe("after-construct");
 
 	// Return the sparse tensor and the remap from original operator to domain of the sparse tensor
 	return {sop, rd};
@@ -9058,8 +9273,94 @@ namespace Chroma
 	      auto eps =
 		std::sqrt(std::numeric_limits<typename real_type<COMPLEX>::type>::epsilon());
 	      for (int i = 0; i < base_norm0.volume(); ++i)
-		if (error.get({{i}}) > eps * base_norm0.get({{i}}))
-		  throw std::runtime_error("cloneOperator: too much error on the cloned operator");
+	      {
+		auto err_i = error.get({{i}});
+		auto base_i = base_norm0.get({{i}});
+		if (err_i > eps * base_i)
+		{
+		  // Diagnostic: report how far over the sqrt(eps) threshold the cloned operator
+		  // is, so we can tell a marginal (numerical) miss from a structural error.
+		  std::fprintf(stderr,
+			       "CLONEERR[%d] test=%s i=%d error=%.3e base=%.3e eps=%.3e ratio(err/base)=%.3e\n",
+			       (int)Layout::nodeNumber(), test_order.c_str(), i, (double)err_i,
+			       (double)base_i, (double)eps,
+			       (double)(base_i > 0 ? err_i / base_i : err_i));
+		  std::fflush(stderr);
+		  // When enabled, distinguish an error confined to the local t faces from an
+		  // interior extraction error.  Localize before copying to host so Glocal
+		  // tensors avoid superbblas' unsupported offset redistribution path.
+		  const char* clone_diag = std::getenv("SB_CLONE_FACE_DIAG");
+		  if (clone_diag != nullptr && std::atoi(clone_diag) != 0)
+		  {
+		    auto to_local_host = [](const auto& t) {
+		      auto local = t.getLocal();
+		      return local.isSubtensor() ? local.cloneOn(OnHost)
+					 : local.make_sure(none, OnHost);
+		    };
+		    auto reference_host = to_local_host(y_op0);
+		    auto residual_host = to_local_host(y_rop0);
+		    const auto t_pos = residual_host.order.find('t');
+		    double error_face = 0.0, base_face = 0.0;
+		    double error_bulk = 0.0, base_bulk = 0.0;
+		    std::vector<double> error_by_t;
+		    std::vector<double> base_by_t;
+		    if (t_pos != std::string::npos && residual_host.size[t_pos] > 0)
+		    {
+		      error_by_t.assign((std::size_t)residual_host.size[t_pos], 0.0);
+		      base_by_t.assign((std::size_t)residual_host.size[t_pos], 0.0);
+		      const auto strides = superbblas::detail::get_strides<std::size_t>(
+		residual_host.size, superbblas::FastToSlow);
+		      const auto* reference_ptr = reference_host.data();
+		      const auto* residual_ptr = residual_host.data();
+		      for (std::size_t k = 0; k < residual_host.volume(); ++k)
+		      {
+		auto coor =
+		  superbblas::detail::index2coor(k, residual_host.size, strides);
+		double error_value = std::abs(std::real(residual_ptr[k])) +
+				     std::abs(std::imag(residual_ptr[k]));
+		double base_value = std::abs(std::real(reference_ptr[k])) +
+				    std::abs(std::imag(reference_ptr[k]));
+		error_by_t[(std::size_t)coor[t_pos]] += error_value;
+		base_by_t[(std::size_t)coor[t_pos]] += base_value;
+		bool is_t_face = coor[t_pos] == 0 ||
+				 coor[t_pos] + 1 == residual_host.size[t_pos];
+		if (is_t_face)
+		{
+		  error_face += error_value;
+		  base_face += base_value;
+		}
+		else
+		{
+		  error_bulk += error_value;
+		  base_bulk += base_value;
+		}
+	      }
+	    }
+	    std::fprintf(stderr,
+			 "SBCLONEFACE[%d] test=%s t_size=%d err_face=%.3e base_face=%.3e "
+			 "err_bulk=%.3e base_bulk=%.3e\n",
+			 (int)Layout::nodeNumber(), test_order.c_str(),
+			 t_pos == std::string::npos ? -1 : residual_host.size[t_pos], error_face,
+			 base_face, error_bulk, base_bulk);
+	    std::fflush(stderr);
+	    if (!error_by_t.empty())
+	    {
+	      std::fprintf(stderr, "SBCLONETSLICE[%d] test=%s", (int)Layout::nodeNumber(),
+			   test_order.c_str());
+	      for (std::size_t t = 0; t < error_by_t.size(); ++t)
+		std::fprintf(stderr, " t%zu=%.3e/%.3e", t, error_by_t[t], base_by_t[t]);
+	      std::fprintf(stderr, "\n");
+	      std::fflush(stderr);
+	    }
+		  }
+		  // Escape hatch: with SB_SKIP_CLONE_CHECK=1, log but don't abort, so we can see
+		  // whether the DD/SuperLU solve still converges with the imperfect clone.
+		  const char* skip = std::getenv("SB_SKIP_CLONE_CHECK");
+		  if (!(skip && std::atoi(skip) != 0))
+		    throw std::runtime_error("cloneOperator: too much error on the cloned operator");
+		  break;
+		}
+	      }
 	    }
 	  }
 	}

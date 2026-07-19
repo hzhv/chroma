@@ -12,6 +12,8 @@
 
 #ifdef BUILD_SUPERLU_DIST
 #  include "util/ferm/chroma_superlu_dist_wrapper.h"
+#  include <cuda_runtime.h>
+#  include <cuda.h> // driver API: cuCtxGetCurrent/cuCtxSetCurrent to guard superbblas' CUDA context across SuperLU_DIST calls
 #endif
 
 #include <algorithm>
@@ -23,6 +25,8 @@
 #include <numeric>
 #include <set>
 #include <sstream>
+#include <type_traits>
+#include <utility>
 
 #ifdef BUILD_SB
 namespace Chroma
@@ -3216,15 +3220,33 @@ namespace Chroma
 
 	Tracker _t(std::string("setup dd solver ") + prefix);
 
-	// Get the local operator and make the solver
-	auto local_op = op.getGlocal();
+	// The per-rank local operator relies on the standard OnEveryone ("tzyx") lattice
+	// partition (see `all_tensor_glocal` / `get_glocal_partition`).  A different distributed
+	// layout would give `getGlocal()` a slice that disagrees with the freshly-built local
+	// sparse operator (e.g. in the SuperLU DD path), silently corrupting the solve.  Fail
+	// loudly instead.
+	if (Layout::numNodes() > 1 && isDistributedOnEveryone(op.i.dist) &&
+	    op.i.dist != OnEveryone)
+	  throw std::runtime_error(
+	    "getDomainDecompositionPrec: the domain-decomposition path requires an "
+	    "OnEveryone-distributed operator; got an incompatible distribution that would "
+	    "mis-partition the per-rank local operator");
+
+	// Get the local operator and make the solver.  We use the offset-free Local (subgrid)
+	// framing rather than the original Glocal one because the Glocal *operator* clone hits a
+	// host heap corruption (malloc_consolidate: invalid chunk size) on both small and large
+	// lattices -- exactly the deep breakage this Local framing was introduced to sidestep.
+	// CAVEAT: the Local framing applies a periodic wrap at the subgrid faces; that is exact
+	// enough for the small/disordered case (converges) but is ~38% off vs the true operator on
+	// the real-gauge 32^3x64 lattice (clone accuracy check).  Under investigation.
+	auto local_op = op.getLocal();
 	const Operator<NOp, COMPLEX> solver = getSolver(local_op, getOptions(ops, "solver"));
 
 	// Return the solver
 	if (!with_correction)
 	  return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
 		    // y = D^{-1}*x
-		    solver(x.getGlocal(), y.getGlocal());
+		    solver(x.getLocal(), y.getLocal());
 		  },
 		  op.i,
 		  op.d,
@@ -3239,11 +3261,11 @@ namespace Chroma
 	  return {[=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
 		    // y0 = D^{-1}*x
 		    auto y0 = y.make_compatible();
-		    solver(x.getGlocal(), y0.getGlocal());
+		    solver(x.getLocal(), y0.getLocal());
 		    // y1 = A*y0
 		    auto y1 = op(y0);
 		    // y = -D^{-1}*y1
-		    solver(y1.scale(-1).getGlocal(), y.getGlocal());
+		    solver(y1.scale(-1).getLocal(), y.getLocal());
 		    // y += 2*y0
 		    y0.scale(2).addTo(y);
 		  },
@@ -3549,13 +3571,35 @@ namespace Chroma
 	if (out.bs == 0 || out.bs != (std::size_t)volume(sp.d.kvdim(), out.col_labels))
 	  throw std::runtime_error(solver_name + ": unsupported non-square dense block shape");
 
+	// Localize FIRST, then copy to host.  `sp.ii/jj/data` are Glocal (global dims, but only
+	// this rank's subgrid slice, anchored at a non-zero global offset).  Calling
+	// `cloneOn`/`make_sure` on a Glocal tensor routes through superbblas' incomplete Glocal
+	// redistribution path, which references the wrong CUDA device and aborts a CUB transform
+	// with `cudaErrorInvalidDevice: invalid device ordinal` on multi-rank runs.  (It only
+	// surfaces on the big lattice, where the redistribution copy is actually exercised; the
+	// small-lattice slice happens to avoid it.)  `getLocal()` collapses each tensor to the
+	// offset-free Local (MPI_COMM_SELF) frame first, so the host copy becomes a purely local
+	// device->host transfer that every superbblas op supports.  This mirrors the working
+	// diagnostic path `t.getLocal().make_sure(none, OnHost)`.
+	if (std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
+	    std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
+	{
+	  std::fprintf(stderr,
+		       "SLUEXTRACT[%d] ii{dist=%s sub=%d} jj{dist=%s sub=%d} data{dist=%s sub=%d}\n",
+		       (int)Layout::nodeNumber(), sp.ii.dist.c_str(), (int)sp.ii.isSubtensor(),
+		       sp.jj.dist.c_str(), (int)sp.jj.isSubtensor(), sp.data.dist.c_str(),
+		       (int)sp.data.isSubtensor());
+	  std::fflush(stderr);
+	}
+	auto ii_local = sp.ii.getLocal();
 	auto ii_host =
-	  (sp.ii.isSubtensor() ? sp.ii.cloneOn(OnHost) : sp.ii.make_sure(none, OnHost)).getLocal();
+	  ii_local.isSubtensor() ? ii_local.cloneOn(OnHost) : ii_local.make_sure(none, OnHost);
+	auto jj_local = sp.jj.getLocal();
 	auto jj_host =
-	  (sp.jj.isSubtensor() ? sp.jj.cloneOn(OnHost) : sp.jj.make_sure(none, OnHost)).getLocal();
+	  jj_local.isSubtensor() ? jj_local.cloneOn(OnHost) : jj_local.make_sure(none, OnHost);
+	auto data_local = sp.data.getLocal();
 	auto data_host =
-	  (sp.data.isSubtensor() ? sp.data.cloneOn(OnHost) : sp.data.make_sure(none, OnHost))
-	    .getLocal();
+	  data_local.isSubtensor() ? data_local.cloneOn(OnHost) : data_local.make_sure(none, OnHost);
 
 	const auto row_size = detail::to_kv(sp.i.order, sp.blki);
 	const auto row_strides =
@@ -3632,11 +3676,15 @@ namespace Chroma
 	    auto dom_coor = jj_ptr[col0];
 	    for (unsigned int q = 0; q < sp.nblockd + sp.nkrond; ++q)
 	      dom_coor[q] = 0;
-	    using superbblas::detail::operator+;
-	    // Sparse column coordinates are stored relative to the local domain partition.
-	    // Promote them back to global anchor coordinates before later code decides
-	    // rank ownership or filters to the current DD-local domain.
-	    dom_coor = dom_coor + dom_local_from;
+	    // NOTE: `jj` already stores GLOBAL domain coordinates.  `fillCpuFunCoor`
+	    // fills the sparse operator's column tensor with global coordinates (local
+	    // index + partition `localFrom`), and `SpTensor::construct` leaves the `jj`
+	    // member global (it only builds a separate localized copy for superbblas).
+	    // So `jj` must NOT be shifted by `dom_local_from` here: on a partition with a
+	    // non-zero offset (a multi-rank domain-decomposition subgrid) that double-
+	    // counts the offset, corrupting the column indices and producing a malformed
+	    // local operator that crashes SuperLU on the ranks whose subgrid does not
+	    // start at the lattice origin.
 
 	    auto blk_src =
 	      data_row.kvslice_from_size({{'u', (int)col}}, {{'u', 1}}).make_sure(none, OnHost);
@@ -4258,15 +4306,95 @@ namespace Chroma
 	return ComplexD(v.r, v.i);
       }
 
-      inline int checkedSuperLUCount(std::size_t n, const std::string& what)
-      {
-	if (n > (std::size_t)std::numeric_limits<int>::max())
-	  throw std::runtime_error("SuperLU_DIST: `" + what + "` exceeds MPI int count limits");
-	return (int)n;
-      }
+	      inline int checkedSuperLUCount(std::size_t n, const std::string& what)
+	      {
+		if (n > (std::size_t)std::numeric_limits<int>::max())
+		  throw std::runtime_error("SuperLU_DIST: `" + what + "` exceeds MPI int count limits");
+		return (int)n;
+	      }
 
-      inline bool parseSuperLUEnvFlag(const char* env, bool default_value)
-      {
+	      inline std::string cudaDriverErrorString(CUresult status)
+	      {
+		const char* name = nullptr;
+		const char* text = nullptr;
+		cuGetErrorName(status, &name);
+		cuGetErrorString(status, &text);
+		std::string out = name ? name : "CUDA_ERROR_UNKNOWN";
+		if (text)
+		  out += std::string(": ") + text;
+		return out;
+	      }
+
+	      inline void checkCudaDriver(CUresult status, const std::string& what)
+	      {
+		if (status != CUDA_SUCCESS)
+		  throw std::runtime_error(what + ": " + cudaDriverErrorString(status));
+	      }
+
+	      struct SuperLUCudaContextGuard {
+		CUcontext ctx = nullptr;
+		CUresult capture_status = CUDA_SUCCESS;
+
+		SuperLUCudaContextGuard() : capture_status(cuCtxGetCurrent(&ctx)) {}
+
+		~SuperLUCudaContextGuard()
+		{
+		  restoreNoThrow();
+		}
+
+		void restore(const std::string& what) const
+		{
+		  checkCudaDriver(capture_status, what + " capture CUDA context");
+		  if (ctx)
+		    checkCudaDriver(cuCtxSetCurrent(ctx), what + " restore CUDA context");
+		  cudaGetLastError();
+		}
+
+		void restoreNoThrow() const
+		{
+		  if (capture_status == CUDA_SUCCESS && ctx)
+		    (void)cuCtxSetCurrent(ctx);
+		  cudaGetLastError();
+		}
+	      };
+
+	      template <typename T>
+	      struct SuperLUGpuResHasMember {
+		template <typename U>
+		static auto test(int) -> decltype(std::declval<U&>().GPURES, std::true_type{});
+		template <typename>
+		static std::false_type test(...);
+		static const bool value = decltype(test<T>(0))::value;
+	      };
+
+	      template <typename T, bool HasGpuRes = SuperLUGpuResHasMember<T>::value>
+	      struct SuperLUGpuResAccess {
+		static bool get(const T&) { return false; }
+		static bool set(T&, yes_no_t) { return false; }
+	      };
+
+	      template <typename T>
+	      struct SuperLUGpuResAccess<T, true> {
+		static bool get(const T& options) { return options.GPURES == YES; }
+		static bool set(T& options, yes_no_t value)
+		{
+		  options.GPURES = value;
+		  return true;
+		}
+	      };
+
+	      inline bool getSuperLUGpuRes(const superlu_dist_options_t& options)
+	      {
+		return SuperLUGpuResAccess<superlu_dist_options_t>::get(options);
+	      }
+
+	      inline bool setSuperLUGpuRes(superlu_dist_options_t& options, yes_no_t value)
+	      {
+		return SuperLUGpuResAccess<superlu_dist_options_t>::set(options, value);
+	      }
+
+	      inline bool parseSuperLUEnvFlag(const char* env, bool default_value)
+	      {
 	if (!env)
 	  return default_value;
 	if (std::strcmp(env, "0") == 0 || std::strcmp(env, "false") == 0 ||
@@ -4305,6 +4433,38 @@ namespace Chroma
 	  {"extra", SLU_EXTRA}};
 	return m;
       }
+
+      /// Debug probe for the CUDA context corruption seen after SuperLU_DIST solves on
+      /// multi-rank DD runs.  Enabled with SB_SUPERLU_CTX_PROBE=1; prints the calling
+      /// thread's current driver context, runtime device, and whether a benign runtime
+      /// call still works, so the corrupting call can be bracketed.  Remove when fixed.
+      inline void superLUCtxProbe(const char* tag)
+      {
+	static const bool enabled = []() {
+	  const char* env = std::getenv("SB_SUPERLU_CTX_PROBE");
+	  return env && std::atoi(env) != 0;
+	}();
+	if (!enabled)
+	  return;
+	CUcontext cur = nullptr;
+	CUresult cres = cuCtxGetCurrent(&cur);
+	int dev = -1;
+	cudaError_t derr = cudaGetDevice(&dev);
+	std::size_t mfree = 0, mtot = 0;
+	cudaError_t merr = cudaMemGetInfo(&mfree, &mtot);
+	fprintf(stderr, "SLUPROBE[%d] %-14s ctx=%p(cu=%d) dev=%d(%s) memInfo=%s\n",
+		Layout::nodeNumber(), tag, (void*)cur, (int)cres, dev, cudaGetErrorName(derr),
+		cudaGetErrorName(merr));
+	fflush(stderr);
+      }
+
+      struct SuperLUCtxProbeGuard {
+	const char* tag;
+	~SuperLUCtxProbeGuard()
+	{
+	  superLUCtxProbe(tag);
+	}
+      };
 
       inline SuperLUOptionOverrides getSuperLUOptionOverrides(const Options& ops)
       {
@@ -4505,7 +4665,7 @@ namespace Chroma
 		<< " Llu=" << llu_struct << " nrhs=" << nrhs << " n=" << (long long)dims_max[0]
 		<< " max_m_loc=" << (long long)dims_max[1]
 		<< " max_nnz_loc=" << (long long)dims_max[2] << " ranks=" << comm_size
-		<< " api_rhs=host_vector"
+		<< " api_rhs=" << (getSuperLUGpuRes(options) ? "device_vector" : "host_vector")
 		<< " acc_offload_option=" << options.superlu_acc_offload
 		<< " acc_offload_effective=" << acc_offload_effective
 		<< " gpu_streams=" << options.superlu_num_gpu_streams
@@ -4725,6 +4885,14 @@ namespace Chroma
 	bool initialized = false;
 	bool factorized = false;
 	std::size_t solve_calls = 0;
+	int cuda_device = -1;
+
+	// GPU-resident RHS (options.GPURES): when enabled the solver's B/X argument
+	// must be a device pointer so pzgssvx does the B<->X redistribution on the
+	// GPU instead of the host. d_rhs is a cached device buffer for that pointer.
+	bool use_gpures = false;
+	doublecomplex* d_rhs = nullptr;
+	std::size_t d_rhs_capacity = 0;
 
 	SuperLUSolverState(const std::string& prefix_, MPI_Comm comm_, int nprow_, int npcol_,
 			   int npdep_, const SuperLUOptionOverrides& overrides_)
@@ -4738,11 +4906,45 @@ namespace Chroma
 	  set_default_options_dist(&options);
 	  applySuperLUOptionOverrides(overrides, options);
 	  applySuperLUAccOffloadEnvOverride(options);
+
+	  // Opt-in GPU-resident RHS path. Only meaningful for the ILU(0) dense-block
+	  // path (which keeps each lattice site a contiguous GPU GEMM block). Passing
+	  // B/X on the device lets pzgssvx keep the per-solve redistribution on the
+	  // GPU; otherwise it falls back to a host gather/scatter that dominates the
+	  // SOLVE phase. See pzgssvx.c: "B, R, C are already device pointers".
+	  if (overrides.has_ilu_level && overrides.ilu_level == 0)
+	  {
+	    const char* env = std::getenv("SB_SUPERLU_GPURES");
+	    if (!env)
+	      env = std::getenv("CHROMA_SUPERLU_GPURES");
+	    if (env && parseSuperLUEnvFlag(env, false))
+	    {
+	      if (!setSuperLUGpuRes(options, YES))
+		throw std::runtime_error(prefix + ": SB_SUPERLU_GPURES requested, but this "
+					 "SuperLU_DIST build does not expose options.GPURES");
+	      use_gpures = true;
+	    }
+	  }
 	  first_fact = options.Fact;
+	  // DEBUG PROBE (SB_SUPERLU_CTX_PROBE): confirm whether the GPU-resident RHS flag was
+	  // actually installed in the options struct at construction time. Remove when fixed.
+	  if (std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
+	      std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
+	  {
+	    const char* g = std::getenv("SB_SUPERLU_GPURES");
+	    std::fprintf(stderr,
+			 "SLUGPURES[%d] ctor: env=%s has_ilu=%d ilu_level=%d use_gpures=%d "
+			 "options.GPURES==YES? %d\n",
+			 (int)Layout::nodeNumber(), g ? g : "(null)", (int)overrides.has_ilu_level,
+			 overrides.ilu_level, (int)use_gpures, (int)getSuperLUGpuRes(options));
+	    std::fflush(stderr);
+	  }
 	}
 
 	~SuperLUSolverState()
 	{
+	  if (d_rhs)
+	    cudaFree(d_rhs);
 	  if (solve_init)
 	    zSolveFinalize(&options, &SOLVEstruct);
 	  if (lu_init)
@@ -4771,7 +4973,22 @@ namespace Chroma
 	    return;
 
 	  n = setup.n;
+	  // SUPERLU_BIND_MPI_GPU makes superlu_gridinit3d rebind the CUDA device using
+	  // the rank within the grid communicator. For a local (MPI_COMM_SELF) grid --
+	  // e.g. a domain-decomposition preconditioner running one SuperLU per rank --
+	  // every rank is "rank 0", so SuperLU rebinds them all to device 0. Restore
+	  // the runtime device here so SuperLU's own GPU path and the cached GPURES
+	  // RHS buffer are built on the same per-rank runtime/NVSHMEM context. The
+	  // caller restores superbblas' original driver context after pzgssvx returns.
+	  int prev_cuda_device = -1;
+	  cudaGetDevice(&prev_cuda_device);
 	  superlu_gridinit3d(comm, nprow, npcol, npdep, &grid);
+	  superLUCtxProbe("post-gridinit");
+	  if (prev_cuda_device >= 0)
+	  {
+	    cuda_device = prev_cuda_device;
+	    cudaSetDevice(prev_cuda_device);
+	  }
 	  grid_init = true;
 
 	  int_t* rowptr = intMalloc_dist(setup.m_loc + 1);
@@ -4843,6 +5060,12 @@ namespace Chroma
 	  return options.Fact;
 	}
 
+	void activateCudaRuntimeDevice()
+	{
+	  if (cuda_device >= 0)
+	    cudaSetDevice(cuda_device);
+	}
+
 	void noteSolveReturned()
 	{
 	  solve_init = true;
@@ -4853,6 +5076,25 @@ namespace Chroma
 	{
 	  factorized = true;
 	  return ++solve_calls;
+	}
+
+	// Lazily (re)allocate the cached device RHS buffer to hold at least `count`
+	// doublecomplex elements, returning the device pointer for use as B/X.
+	doublecomplex* ensureDeviceRhs(std::size_t count)
+	{
+	  if (count > d_rhs_capacity)
+	  {
+	    if (d_rhs)
+	      cudaFree(d_rhs);
+	    if (cudaMalloc((void**)&d_rhs, count * sizeof(doublecomplex)) != cudaSuccess)
+	    {
+	      d_rhs = nullptr;
+	      d_rhs_capacity = 0;
+	      throw std::runtime_error(prefix + ": cudaMalloc failed for GPURES device RHS");
+	    }
+	    d_rhs_capacity = count;
+	  }
+	  return d_rhs;
 	}
       };
 
@@ -5260,6 +5502,46 @@ namespace Chroma
 	}
 	setup.nnz_loc = (int_t)setup.colind.size();
 
+	// Debug dump for the multi-rank zero-pivot investigation (SB_SUPERLU_CTX_PROBE=1):
+	// per parity half (rows [0, m/2) vs [m/2, m)), report how many rows carry a
+	// structural diagonal entry and the aggregate |A_ii|, plus stats of the first
+	// failing pivot row.  Remove when fixed.
+	if (std::getenv("SB_SUPERLU_CTX_PROBE") && std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
+	{
+	  const int_t half = setup.m_loc / 2;
+	  int_t diag_rows[2] = {0, 0};
+	  double diag_mag[2] = {0.0, 0.0};
+	  int_t row_nnz[2] = {0, 0};
+	  int_t first_nodiag = -1;
+	  for (int_t i = 0; i < setup.m_loc; ++i)
+	  {
+	    const int hidx = i < half ? 0 : 1;
+	    bool has_diag = false;
+	    for (int_t k = setup.rowptr[(std::size_t)i]; k < setup.rowptr[(std::size_t)i + 1]; ++k)
+	    {
+	      ++row_nnz[hidx];
+	      if (setup.colind[(std::size_t)k] == i)
+	      {
+		has_diag = true;
+		diag_mag[hidx] += std::abs(setup.nzval[(std::size_t)k].r) +
+				  std::abs(setup.nzval[(std::size_t)k].i);
+	      }
+	    }
+	    if (has_diag)
+	      ++diag_rows[hidx];
+	    else if (first_nodiag < 0)
+	      first_nodiag = i;
+	  }
+	  fprintf(stderr,
+		  "SLUMAT[%d] m=%lld half=%lld | even: diag_rows=%lld |diag|=%g nnz=%lld | odd: "
+		  "diag_rows=%lld |diag|=%g nnz=%lld | first_row_without_diag=%lld\n",
+		  Layout::nodeNumber(), (long long)setup.m_loc, (long long)half,
+		  (long long)diag_rows[0], diag_mag[0], (long long)row_nnz[0],
+		  (long long)diag_rows[1], diag_mag[1], (long long)row_nnz[1],
+		  (long long)first_nodiag);
+	  fflush(stderr);
+	}
+
 	detail::log(1, prefix + " SuperLU local DD rows=" + std::to_string((long long)setup.m_loc) +
 			 " nnz=" + std::to_string((long long)setup.nnz_loc));
 	return setup;
@@ -5370,6 +5652,10 @@ namespace Chroma
 	// reuse the first LU factorization and only solve new right-hand sides.
 	return Operator<NOp, ComplexD>{
 	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
+	    // Declared first so its destructor fires LAST, after stat_scope's (PStatFree):
+	    // catches context corruption from the very end of the lambda.
+	    SuperLUCtxProbeGuard _ctx_probe_guard{"lambda-exit"};
+	    superLUCtxProbe("lambda-entry");
 	    SuperLUTimer timing;
 	    auto mark_timing = [&]() { return superlu_timing_level > 0 ? timing.mark() : 0.0; };
 	    const std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
@@ -5517,23 +5803,55 @@ namespace Chroma
 	    }
 	    const double t_assemble_rhs = mark_timing();
 
+	    // SuperLU_DIST's GPU setup/solve may leave another CUDA context current on
+	    // this thread. Restore the exact context that owns superbblas' cached streams
+	    // before returning to superbblas tensor copies below.
+	    superLUCtxProbe("pre-init");
+	    SuperLUCudaContextGuard cuda_ctx_guard;
+
 	    superlu_state->initialize(*setup);
+	    superlu_state->activateCudaRuntimeDevice();
+	    superLUCtxProbe("post-init");
 	    const fact_t solve_fact = superlu_state->prepareSolve();
 	    SuperLUStatScope stat_scope;
 	    const double t_superlu_setup = mark_timing();
 
 	    std::vector<double> berr(std::max<std::size_t>(nrhs, 1), 0.0);
 	    int info = 0;
+	    // With GPURES the solver's B/X argument must live on the GPU: stage the
+	    // assembled host RHS to the device, solve in place, then read the solution
+	    // back so the host-side unpacking below is unchanged.
+	    doublecomplex* solve_b = b.data();
+	    const std::size_t solve_b_count = (std::size_t)ldb * (std::size_t)nrhs;
+	    if (superlu_state->use_gpures)
+	    {
+	      solve_b = superlu_state->ensureDeviceRhs(solve_b_count);
+	      if (cudaMemcpy(solve_b, b.data(), solve_b_count * sizeof(doublecomplex),
+			     cudaMemcpyHostToDevice) != cudaSuccess)
+		throw std::runtime_error("SuperLU_DIST: cudaMemcpy H2D of RHS failed");
+	    }
 	    if (superlu_state->npdep == 1)
 	      pzgssvx(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
-		      b.data(), ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid.grid2d,
+		      solve_b, ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid.grid2d,
 		      &superlu_state->LUstruct, &superlu_state->SOLVEstruct, berr.data(),
 		      &stat_scope.stat, &info);
 	    else
 	      pzgssvx3d(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
-			b.data(), ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid,
+			solve_b, ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid,
 			&superlu_state->LUstruct, &superlu_state->SOLVEstruct, berr.data(),
 			&stat_scope.stat, &info);
+	    if (superlu_state->use_gpures && info == 0)
+	    {
+	      if (cudaMemcpy(b.data(), solve_b, solve_b_count * sizeof(doublecomplex),
+			     cudaMemcpyDeviceToHost) != cudaSuccess)
+		throw std::runtime_error("SuperLU_DIST: cudaMemcpy D2H of solution failed");
+	    }
+	    // Restore superbblas'/QDP-JIT's CUDA context that SuperLU_DIST switched away
+	    // from. Calling cudaSetDevice() here is not a substitute: it can create or
+	    // select a runtime context while superbblas' streams still belong to the saved
+	    // driver context.
+	    cuda_ctx_guard.restore("SuperLU_DIST pzgssvx");
+	    superLUCtxProbe("post-solve");
 	    const double t_pzgssvx3d = mark_timing();
 	    superlu_state->noteSolveReturned();
 	    if (info != 0)
@@ -5572,7 +5890,9 @@ namespace Chroma
 	    }
 	    const double t_scatter_solution = mark_timing();
 
+	    superLUCtxProbe("pre-copyTo");
 	    yh.copyTo(y_sparse);
+	    superLUCtxProbe("post-copyTo");
 	    const double t_copy_output = mark_timing();
 	    if (superlu_timing_level > 0)
 	    {

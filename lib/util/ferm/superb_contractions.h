@@ -6093,6 +6093,21 @@ namespace Chroma
 			      domain_extension,
 			      isImgFastInBlock};
 
+	// NOTE (2026-08-13, measured): the two coordinate transforms below compose into a PERIODIC
+	// WRAP at the subgrid faces, not the Dirichlet truncation a block-Jacobi DD preconditioner
+	// nominally wants.  This transform rebases a global column onto the subgrid origin modulo
+	// the GLOBAL extent, so an off-rank neighbour lands in [localSize, domDim); construct()
+	// then folds it back modulo the SUBGRID extent (for a Local tensor extend_support() is a
+	// no-op), landing it on the opposite face of the same subgrid.  The local operator is
+	// therefore the subgrid operator with periodic BCs, ~38% off the true operator on the
+	// real-gauge 32^3x64 lattice.
+	//
+	// It is deliberately left alone.  Truncating it to Dirichlet (mask the blocks whose column
+	// leaves the subgrid) was implemented and measured on that lattice: outer iterations went
+	// 1682 -> 1677, i.e. nothing, while one inversion went 257.5 s -> 361.4 s.  A DD
+	// preconditioner already discards ALL inter-domain coupling, so whether the faces wrap or
+	// vanish is second order -- 38% operator error does not mean 38% preconditioner
+	// degradation.  Do not "fix" this again without a convergence measurement that justifies it.
 	r.ii = ii.getLocal();
 	const auto localFrom = d.p->localFrom();
 	const auto domDim = d.dim;
@@ -8059,12 +8074,28 @@ namespace Chroma
 	{
 	  if (power_label == 0)
 	  {
+	    // Instrumentation for the functional-operator call path.
+	    //
+	    // SuperLU's own timer lives INSIDE fop, so whatever this wrapper costs is invisible to
+	    // it.  Measured on the real gauge: reaching the SuperLU solver through a preconditioner
+	    // (`prec(r, kr)` in the inner MR) costs ~850 ms per apply while the SuperLU wrapper
+	    // self-reports ~123 ms, and the surplus shows up only as MPI wait in the OUTER matvec
+	    // (0.72 s -> 25.0 s over 30 outer iterations).  Calling the same solver directly, as
+	    // the bare DD configuration does, does not pay it.  The split below puts the cost on a
+	    // name: `fop wrapper` total minus `call fop` minus `copy back` is the tensor prep.
+	    Tracker _t_wrapper("fop wrapper");
 	    auto x0 = x.template collapse_dimensions<NOp + 1>(cols_and_power, 'n', true)
 			.template cast<COMPLEX>();
 	    auto y0 = y.template collapse_dimensions<NOp + 1>(cols_and_power, 'n', true)
 			.template cast_like<COMPLEX>();
-	    fop(x0, y0);
-	    y0.copyTo(y);
+	    {
+	      Tracker _t("call fop");
+	      fop(x0, y0);
+	    }
+	    {
+	      Tracker _t("copy back");
+	      y0.copyTo(y);
+	    }
 	  }
 	  else if (power > 0)
 	  {

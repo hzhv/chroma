@@ -800,37 +800,94 @@ namespace Chroma
       unsigned int nops = 0, nprecs = 0;
 
       // Compute residual, r = x - op * y
+      //
+      // Everything from here to the loop is per-CALL, not per-iteration: four temporaries
+      // (r, normr, p, kr), the initial residual, and the max(normr0) guard.  On the coarse
+      // domain solve mr() is entered 463 times and runs a single iteration each time, so any
+      // fixed entry cost is paid in full 463 times and amortised over nothing.  The whole
+      // loop body is already instrumented -- prec, op, norm, max, alpha, axpy -- and those
+      // sum to 1.10 ms against a 14.89 ms residual, so the time is outside the loop.
       Tensor<NOp + 1, COMPLEX> r;
-      if (passing_initial_guess)
-      {
-	r = op(y).scale(-1);
-	nops += num_cols;
-      }
-      else
-      {
-	r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim());
-	r.set_zero();
-	y.set_zero();
-      }
-      x.addTo(r);
-      auto normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
-      if (max(normr0) == 0)
-	return;
-
-      // Do the iterations
-      auto normr = normr0.clone();	 ///< residual norms
+      Tensor<1, typename detail::real_type<COMPLEX>::type> normr0, normr;
+      Tensor<NOp + 1, COMPLEX> p, kr;
       unsigned int it = 0;		 ///< iteration number
       double max_tol = HUGE_VAL;	 ///< maximum residual norm
       unsigned int residual_updates = 0; ///< number of residual updates
-      auto p = r.make_compatible();	 ///< p will hold A * prec * r
-      auto kr = prec ? prec.template make_compatible_img<NOp + 1>(order_cols, x.kvdim()) : r;
+      {
+	Tracker _t_entry(std::string("mr entry ") + prefix);
+	if (passing_initial_guess)
+	{
+	  r = op(y).scale(-1);
+	  nops += num_cols;
+	}
+	else
+	{
+	  r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim());
+	  r.set_zero();
+	  y.set_zero();
+	}
+	x.addTo(r);
+	normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
+	normr = normr0.clone();		 ///< residual norms
+	p = r.make_compatible();	 ///< p will hold A * prec * r
+	kr = prec ? prec.template make_compatible_img<NOp + 1>(order_cols, x.kvdim()) : r;
+      }
+      {
+	Tracker _t_guard(std::string("mr guard ") + prefix);
+	if (max(normr0) == 0)
+	  return;
+      }
       for (it = 0; it < max_its;)
       {
 	// kr = prec * r
 	if (prec)
 	{
+	  // SB_PREC_PROBE=1: per-rank wall time of the preconditioner application.
+	  //
+	  // The barrier probe below showed ranks arriving at the outer matvec spread over ~1.2 s
+	  // per iteration in iit1 against ~0.045 s in bare, with the last arrival ROTATING rather
+	  // than pinned to one slow rank (mean wait 0.775-0.854 s, only 10% apart across ranks).
+	  // SuperLU's own per-rank time is balanced (16% spread, 0.2 s accumulated) and the inner
+	  // solver's superbblas kernels account for 1.4%, so the spread is produced somewhere in
+	  // this call that no existing timer covers.  Printing the duration per rank separates
+	  // "the call itself varies" from "the spread was inherited from earlier".
+	  const bool prec_probe = std::getenv("SB_PREC_PROBE") && op.d.dist != Local;
+	  const double t_prec0 = prec_probe ? detail::w_time() : 0.0;
 	  prec(r, kr);
+	  if (prec_probe)
+	  {
+	    const double t_prec1 = detail::w_time();
+	    std::fprintf(stderr, "SBPREC[%d] it=%u t0=%.6f dur=%.6f\n", (int)Layout::nodeNumber(),
+			 it, t_prec0, t_prec1 - t_prec0);
+	    std::fflush(stderr);
+	  }
 	  nprecs += num_cols;
+	}
+
+	// SB_BARRIER_PROBE=1: measure how far apart the ranks arrive at the outer matvec.
+	//
+	// iit1 spends 23.6 s in `distributed BSR matvec/MPI wait` against bare's 0.39 s over the
+	// same 30 calls, and the obvious explanation -- SuperLU load imbalance exposed by the
+	// inner solver -- has been measured and ruled out: the per-rank SuperLU spread is 16.8%
+	// (bare) vs 15.5% (iit1), worth 0.55 s vs 0.75 s accumulated, nowhere near 23 s.
+	//
+	// An explicit barrier separates the two remaining possibilities.  Large, spread-out
+	// barrier times mean the ranks really do arrive at different moments and the halo wait is
+	// just where that shows up; near-zero barrier times mean arrival is synchronous and the
+	// 23 s is spent inside the exchange itself, not waiting for a straggler.
+	//
+	// The `dist != Local` guard is essential: mr() serves BOTH the outer solver and the
+	// per-rank inner solver, and the inner one runs on MPI_COMM_SELF tensors.  A global
+	// barrier there deadlocks as soon as one rank takes a different path (e.g. the
+	// `max(normr0) == 0` early return above), because the ranks then disagree on how many
+	// barriers to execute -- which is exactly how the first version of this probe hung iit1.
+	if (std::getenv("SB_BARRIER_PROBE") && op.d.dist != Local)
+	{
+	  const double t_pre = detail::w_time();
+	  MPI_Barrier(MPI_COMM_WORLD);
+	  std::fprintf(stderr, "SBSKEW[%d] it=%u barrier=%.5f\n", (int)Layout::nodeNumber(), it,
+		       detail::w_time() - t_pre);
+	  std::fflush(stderr);
 	}
 
 	// p = A * kr
@@ -838,14 +895,21 @@ namespace Chroma
 	nops += num_cols;
 
 	// alpha = (p' * r) / (p' * p)
-	auto alpha =
-	  div(contract<1>(r, p.conj(), order_rows), contract<1>(p, p.conj(), order_rows));
+	Tensor<1, COMPLEX> alpha;
+	{
+	  Tracker _t_alpha(std::string("mr alpha ") + prefix);
+	  alpha =
+	    div(contract<1>(r, p.conj(), order_rows), contract<1>(p, p.conj(), order_rows));
+	}
 
-	// y = y + alpha * kr
-	contract<NOp + 1>(kr, alpha, "", AddTo, y);
+	{
+	  Tracker _t_axpy(std::string("mr axpy ") + prefix);
+	  // y = y + alpha * kr
+	  contract<NOp + 1>(kr, alpha, "", AddTo, y);
 
-	// r = r - alpha * p
-	contract<NOp + 1>(p.scale(-1), alpha, "", AddTo, r);
+	  // r = r - alpha * p
+	  contract<NOp + 1>(p.scale(-1), alpha, "", AddTo, r);
+	}
 
 	// Update residual if needed
 	if (residual_updates < max_residual_updates)
@@ -861,7 +925,20 @@ namespace Chroma
 	}
 
 	// Compute the norm
-	auto normr = norm<1>(r, op.order_t + order_cols);
+	//
+	// Instrumentation for the residual left over after subtracting every tracked child of
+	// `mr <prefix>`.  On the coarse domain solve that residual is 14.9 ms per call against a
+	// 4.6 ms total when SuperLU is invoked directly, and three explanations have been ruled
+	// out by measurement: collective printing (NoOutput left it at 14.98 ms), cross-rank
+	// reduction (compatible_replicated_distribution returns Local unchanged), and async queue
+	// drainage (CUDA_LAUNCH_BLOCKING=1 left it at 14.85 ms).  What remains untracked in this
+	// loop is norm<1>, div, and max -- max copies to the host via make_sure(none, OnHost, ...)
+	// on every call.  These three Trackers split them apart.
+	Tensor<1, typename detail::real_type<COMPLEX>::type> normr;
+	{
+	  Tracker _t_norm(std::string("mr norm ") + prefix);
+	  normr = norm<1>(r, op.order_t + order_cols);
+	}
 
 	// Show residual error
 	if (superbblas::getDebugLevel() > 0)
@@ -878,7 +955,10 @@ namespace Chroma
 	}
 
 	// Get the worse tolerance
-	max_tol = max(div(normr, normr0));
+	{
+	  Tracker _t_max(std::string("mr max ") + prefix);
+	  max_tol = max(div(normr, normr0));
+	}
 
 	// Report iteration
 	if (verb >= Detailed)
@@ -1461,6 +1541,7 @@ namespace Chroma
 		  foreachInChuncks(
 		    x, y, max_simultaneous_rhs,
 		    [=](Tensor<NOp + 1, COMPLEX> x, Tensor<NOp + 1, COMPLEX> y) {
+		      Tracker _t_body(std::string("mr body ") + prefix);
 		      mr(op, prec, x, y, tol, max_its, error_if_not_converged, max_residual_updates,
 			 false /* no init guess */, verb, prefix);
 		    },
@@ -1721,9 +1802,45 @@ namespace Chroma
 	    }
 
 	    // Solve Ax=0 with the random initial guesses
-	    nv = op(null_solver(b));
-	    b.scale(-1).addTo(nv);
+	    // nv = op(null_solver(b)); // < residual: -r
+		// b.scale(-1).addTo(nv);   // nv = A(A^{-1}b) = Ay
+									// -b + nv = -b + Ay = -r
+		nv = null_solver(op(b));    // < error:    -e
+		                            // Ay = Ab => y = A^{-1}Ab = b
+	    b.scale(-1).addTo(nv);      // -b + nv = -b + A^{-1}Ab = -b + y = -e
 	    b.release();
+
+	    // How close to the near-null space are these vectors actually?  Every conclusion so
+	    // far about why one null-vector strategy beats another has been inferred from how the
+	    // COARSE operator behaves (4.9 MR steps per solve for a dd-preconditioned solve
+	    // against 69.4 for an unpreconditioned one), never measured on the vectors.
+	    //
+	    // nv is the residual of solving Ax=b, so ||A*nv||/||nv|| is the direct test: a genuine
+	    // near-null vector has A*v ~ 0, and for an eigenvector this ratio is |lambda|.  If the
+	    // dd-preconditioned run shows a systematically LARGER ratio than the unpreconditioned
+	    // ones, the claim that its residual is shaped by the preconditioned operator's
+	    // spectrum rather than A's own becomes a measurement instead of an inference.  If the
+	    // ratios come out alike, that explanation is wrong.
+	    //
+	    // Costs num_null_vecs extra matvecs, negligible against a setup that already ran
+	    // thousands of MR steps, but gated anyway so ordinary runs are untouched.
+	    if (std::getenv("SB_NV_PROBE"))
+	    {
+	      auto Anv = nv.make_compatible();
+	      op(nv, Anv);
+	      auto rn = div(norm<1>(Anv, "n"), norm<1>(nv, "n"))
+			  .make_sure(none, OnHost, OnEveryoneReplicated);
+	      std::vector<double> v;
+	      for (unsigned int i = 0; i < num_null_vecs; ++i)
+		v.push_back((double)rn.get(Coor<1>{(int)i}));
+	      std::sort(v.begin(), v.end());
+	      const std::size_t n = v.size();
+	      QDPIO::cout << "NVPROBE |A*v|/|v| n: " << n << " min: " << detail::tostr(v[0], 4)
+			  << " q1: " << detail::tostr(v[n / 4], 4)
+			  << " med: " << detail::tostr(v[n / 2], 4)
+			  << " q3: " << detail::tostr(v[n * 3 / 4], 4)
+			  << " max: " << detail::tostr(v[n - 1], 4) << std::endl;
+	    }
 	  }
 	  else
 	  {
@@ -1832,6 +1949,35 @@ namespace Chroma
 	      auto svd_s =
 		std::get<1>(svd_result).template cast<COMPLEX>(); // get the singular values
 	      std::get<2>(svd_result).release(); // release the right singular vectors
+
+	      // Singular value decay of the block-local null vectors, normalised by s_0.
+	      //
+	      // This SVD runs independently per block (8192 of them for 32^3x64 with 4^4 blocking,
+	      // the batch dimensions here) on a (block sites x colour x spin) by num_null_vecs
+	      // matrix, and only the leading num_colors left singular vectors survive.  The
+	      // singular values are computed and then thrown away, so nothing has ever shown
+	      // whether those retained directions carry comparable weight.
+	      //
+	      // A slow decay means the raw vectors really do span num_colors directions locally.
+	      // A steep one means the later colours rest on what is numerically noise -- the SVD
+	      // still emits num_colors orthonormal vectors either way, so `ortho summary rank: 24`
+	      // looks identical no matter which is true.  That distinguishes an over-converged
+	      // batch, where a long flat asymptotic phase can drive every column toward the same
+	      // slowest direction, from one stopped while the columns are still diverse.
+	      //
+	      // Aggregated as the L2 norm across blocks for each singular index; per-block output
+	      // would be 16384 rows per run.
+	      if (std::getenv("SB_NV_PROBE"))
+	      {
+		auto sn = norm<1>(svd_s, "^").make_sure(none, OnHost, OnEveryoneReplicated);
+		const int ns = (int)svd_s.kvdim().at('^');
+		const double s0 = (double)sn.get(Coor<1>{0});
+		std::stringstream ss;
+		for (int k = 0; k < ns && k < (int)num_colors + 4; ++k)
+		  ss << " " << detail::tostr((double)sn.get(Coor<1>{k}) / (s0 == 0 ? 1 : s0), 3);
+		QDPIO::cout << "NVPROBE svd s_k/s_0 (nv=" << current_nv << " colors=" << num_colors
+			    << " ns=" << ns << "):" << ss.str() << std::endl;
+	      }
 
 	      if (nv_created + current_nv >= num_null_vecs)
 	      {
@@ -3236,10 +3382,22 @@ namespace Chroma
 	// framing rather than the original Glocal one because the Glocal *operator* clone hits a
 	// host heap corruption (malloc_consolidate: invalid chunk size) on both small and large
 	// lattices -- exactly the deep breakage this Local framing was introduced to sidestep.
-	// CAVEAT: the Local framing applies a periodic wrap at the subgrid faces; that is exact
-	// enough for the small/disordered case (converges) but is ~38% off vs the true operator on
-	// the real-gauge 32^3x64 lattice (clone accuracy check).  Under investigation.
-	auto local_op = op.getLocal();
+	// The periodic wrap the Local framing used to apply at the subgrid faces (~38% off on the
+	// real-gauge 32^3x64) is now truncated to Dirichlet inside SpTensor::getLocal().
+	//
+	// getLocal() only genuinely localizes the SPARSE branch: for a functional operator it
+	// reuses the lambda untouched and merely relabels the domain/image as Local, so the first
+	// contract inside the lambda hits captured OnEveryone tensors and throws "one of the
+	// contracted tensors ... is local/glocal and others are not".  Every operator that reached
+	// here historically came from cloneOperator (sparse), which is why this never showed up;
+	// `eo` is the first composite that arrives as a lambda.  Make it explicit first --
+	// getSuperLUSolver skips its own clone when `sp` is already set, so this costs nothing
+	// extra.
+	auto op_sp = !op.fop ? op
+			     : cloneOperator(op, getFurthestNeighborDistance(op),
+					     op.preferred_col_ordering, RowMajor,
+					     ConsiderBlockingSparse, "dd local");
+	auto local_op = op_sp.getLocal();
 	const Operator<NOp, COMPLEX> solver = getSolver(local_op, getOptions(ops, "solver"));
 
 	// Return the solver
@@ -3814,7 +3972,9 @@ namespace Chroma
 	  throw std::runtime_error("ILU0: unsupported sparse format with fast image in block");
 
 	// Local block-CSR extraction from SpTensor
-	auto local_blocks = extractExplicitLocalBlockRows(sp, t.second, "ILU0");
+	auto local_blocks_ptr = std::make_shared<ExplicitLocalBlockRows<NOp, COMPLEX>>(
+	  extractExplicitLocalBlockRows(sp, t.second, "ILU0"));
+	auto& local_blocks = *local_blocks_ptr;
 	auto x_pos = local_blocks.sp.i.order.find('X');
 	bool explicit_two_color =
 	  x_pos != std::string::npos && local_blocks.sp.i.kvdim().count('X') == 1 &&
@@ -4074,6 +4234,7 @@ namespace Chroma
 
 	return Operator<NOp, COMPLEX>{
 	  [=](const Tensor<NOp + 1, COMPLEX>& x, Tensor<NOp + 1, COMPLEX> y) {
+	    const auto& local_blocks = *local_blocks_ptr;
 	    std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
 	    std::size_t nrhs = x.volume(order_cols);
 	    if (nrhs == 0)
@@ -4334,20 +4495,83 @@ namespace Chroma
 	      struct SuperLUCudaContextGuard {
 		CUcontext ctx = nullptr;
 		CUresult capture_status = CUDA_SUCCESS;
+		int device = -1;
 
-		SuperLUCudaContextGuard() : capture_status(cuCtxGetCurrent(&ctx)) {}
+		SuperLUCudaContextGuard() : capture_status(cuCtxGetCurrent(&ctx))
+		{
+		  // Remember the device while the context is still known good; after
+		  // SuperLU_DIST has run, cudaGetDevice() itself can fail.
+		  if (cudaGetDevice(&device) != cudaSuccess)
+		  {
+		    device = -1;
+		    cudaGetLastError();
+		  }
+		}
 
 		~SuperLUCudaContextGuard()
 		{
 		  restoreNoThrow();
 		}
 
+		/// Can the runtime API actually use whatever context is current?
+		///
+		/// cudaFree(0) is the cheapest call that forces the runtime to bind to the
+		/// current context, so it turns "the saved handle is stale" into a testable
+		/// condition instead of a crash three calls later inside superbblas.
+		static bool runtimeUsable()
+		{
+		  cudaGetLastError();
+		  const bool ok = (cudaFree(0) == cudaSuccess);
+		  cudaGetLastError();
+		  return ok;
+		}
+
+		/// Re-retain the device's primary context and make it current.
+		static bool repairPrimaryContext(int dev)
+		{
+		  if (dev < 0)
+		    return false;
+		  cudaGetLastError();
+		  CUdevice cudev;
+		  if (cuDeviceGet(&cudev, dev) != CUDA_SUCCESS)
+		    return false;
+		  CUcontext prim = nullptr;
+		  if (cuDevicePrimaryCtxRetain(&prim, cudev) != CUDA_SUCCESS)
+		    return false;
+		  if (cuCtxSetCurrent(prim) != CUDA_SUCCESS)
+		    return false;
+		  return runtimeUsable();
+		}
+
+		/// Put the runtime API back in a usable state after SuperLU_DIST has run.
+		///
+		/// Restoring the saved handle with cuCtxSetCurrent is NOT enough on the
+		/// distributed path (nprow*npcol*npdep > 1, so superlu_comm is MPI_COMM_WORLD
+		/// rather than MPI_COMM_SELF).  SuperLU_DIST's multi-rank GPU code can leave the
+		/// device's primary context destroyed: the saved CUcontext still looks like a
+		/// valid pointer and cuCtxSetCurrent reports success, but the next runtime call
+		/// -- superbblas' first setDevice/stream op -- fails with
+		/// cudaErrorDeviceUninitialized.  That is exactly how a 4-rank global ILU(0) run
+		/// dies on its first coarse apply, while the same configuration on one rank, or
+		/// on any number of ranks behind `dd` (which makes the operator Local and so
+		/// puts SuperLU on MPI_COMM_SELF), runs to completion.
 		void restore(const std::string& what) const
 		{
 		  checkCudaDriver(capture_status, what + " capture CUDA context");
 		  if (ctx)
 		    checkCudaDriver(cuCtxSetCurrent(ctx), what + " restore CUDA context");
 		  cudaGetLastError();
+		  if (runtimeUsable())
+		    return;
+		  const bool repaired = repairPrimaryContext(device);
+		  std::fprintf(stderr, "SLUCTXFIX[%d] %s: primary-context repair %s (dev=%d)\n",
+			       (int)Layout::nodeNumber(), what.c_str(),
+			       repaired ? "OK" : "FAILED", device);
+		  std::fflush(stderr);
+		  if (!repaired)
+		    throw std::runtime_error(
+		      what + ": CUDA context unusable after SuperLU_DIST and primary-context "
+			     "repair failed");
 		}
 
 		void restoreNoThrow() const
@@ -4355,6 +4579,8 @@ namespace Chroma
 		  if (capture_status == CUDA_SUCCESS && ctx)
 		    (void)cuCtxSetCurrent(ctx);
 		  cudaGetLastError();
+		  if (!runtimeUsable())
+		    (void)repairPrimaryContext(device);
 		}
 	      };
 
@@ -5637,7 +5863,9 @@ namespace Chroma
 	// Match the DD-local ILU path here: extract the local rows directly from the glocal sparse
 	// operator view. Forcing `sp.getLocal()` reindexes the row anchors differently from the RHS
 	// tensor layout and produces out-of-bounds local row offsets on multi-rank DD solves.
-	auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST");
+	auto local_blocks_ptr = std::make_shared<ExplicitLocalBlockRows<NOp, ComplexD>>(
+	  extractExplicitLocalBlockRows(sp, rd, "SuperLU_DIST"));
+	auto& local_blocks = *local_blocks_ptr;
 	/* ILU(0) installs per-site dense supernodes, which require the full
 	   bs x bs blocks to be stored (no intra-block zero dropping). */
 	const bool dense_blocks = superlu_options.has_ilu_level && superlu_options.ilu_level == 0;
@@ -5656,6 +5884,7 @@ namespace Chroma
 	    // catches context corruption from the very end of the lambda.
 	    SuperLUCtxProbeGuard _ctx_probe_guard{"lambda-exit"};
 	    superLUCtxProbe("lambda-entry");
+	    const auto& local_blocks = *local_blocks_ptr;
 	    SuperLUTimer timing;
 	    auto mark_timing = [&]() { return superlu_timing_level > 0 ? timing.mark() : 0.0; };
 	    const std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
@@ -5758,6 +5987,17 @@ namespace Chroma
 
 	    // SuperLU expects each rank to own a contiguous global row slab, so the RHS must be
 	    // redistributed from Chroma's native layout before the solve and sent back afterwards.
+	    // Hottest loop in the ILU(0) apply: one iteration per local row per solve
+	    // (~1.6M for 32^3x64 on 16 ranks). It cost 272 ms of a 379 ms apply -- 64% of the
+	    // whole inversion -- because of loop-invariant work in the checked_offset
+	    // arguments. x_local.volume() and x_local.localVolume() were evaluated per
+	    // element, and localVolume() reaches Layout::nodeNumber() in another translation
+	    // unit, so the compiler must emit the call even though it discards the diagnostic
+	    // string those values feed. (That is why the object file carries no "dense_idx="
+	    // literal while the loop still paid for the calls.) Hoisting the invariants and
+	    // materialising the message only on failure keeps the bounds check and the error
+	    // text byte-identical.
+	    const std::size_t x_volume = x_local.volume();
 	    std::vector<doublecomplex> send_rhs(setup->send_rows.size() * nrhs,
 						doublecomplex{0, 0});
 	    for (std::size_t i = 0; i < setup->send_rows.size(); ++i)
@@ -5767,13 +6007,19 @@ namespace Chroma
 				   ? (std::size_t)row.global_row
 				   : x_row_off[row.row_idx] + x_dense_off[row.dense_idx];
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-		send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(xptr[checked_offset(
-		  base, x_rhs_off[rhs], x_local.volume(), "RHS",
-		  std::string("row_idx=") + std::to_string(row.row_idx) +
-		    ", dense_idx=" + std::to_string(row.dense_idx) + ", global_row=" +
-		    std::to_string((long long)row.global_row) + ", x_local_volume=" +
-		    std::to_string(x_local.volume()) + ", x_local_localVolume=" +
-		    std::to_string(x_local.localVolume()) + ", nrhs=" + std::to_string(nrhs))]));
+	      {
+		const std::size_t rhs_off = x_rhs_off[rhs];
+		if (base > x_volume || rhs_off > x_volume - base)
+		  checked_offset(base, rhs_off, x_volume, "RHS",
+				 std::string("row_idx=") + std::to_string(row.row_idx) +
+				   ", dense_idx=" + std::to_string(row.dense_idx) +
+				   ", global_row=" + std::to_string((long long)row.global_row) +
+				   ", x_local_volume=" + std::to_string(x_volume) +
+				   ", x_local_localVolume=" +
+				   std::to_string(x_local.localVolume()) +
+				   ", nrhs=" + std::to_string(nrhs));
+		send_rhs[i * nrhs + rhs] = toSuperLUComplex(ComplexD(xptr[base + rhs_off]));
+	      }
 	    }
 	    const double t_pack_rhs = mark_timing();
 
@@ -5878,6 +6124,9 @@ namespace Chroma
 	    if (recv_sol.size() != setup->send_sol_rows.size() * nrhs)
 	      throw std::runtime_error("SuperLU_DIST: received solution value count mismatch");
 
+	    // Same invariant hoist as the RHS pack above: y_local.volume() does not change
+	    // across the loop, and re-deriving it per element is the bulk of scatter_solution.
+	    const std::size_t y_volume = y_local.volume();
 	    for (std::size_t i = 0; i < setup->send_sol_rows.size(); ++i)
 	    {
 	      const auto& row = setup->send_sol_rows[i];
@@ -5885,7 +6134,7 @@ namespace Chroma
 				   ? (std::size_t)row.global_row
 				   : y_row_off[row.row_idx] + y_dense_off[row.dense_idx];
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
-		yptr[checked_offset(base, y_rhs_off[rhs], y_local.volume(), "solution")] =
+		yptr[checked_offset(base, y_rhs_off[rhs], y_volume, "solution")] =
 		  fromSuperLUComplex(recv_sol[i * nrhs + rhs]);
 	    }
 	    const double t_scatter_solution = mark_timing();
@@ -5894,6 +6143,35 @@ namespace Chroma
 	    yh.copyTo(y_sparse);
 	    superLUCtxProbe("post-copyTo");
 	    const double t_copy_output = mark_timing();
+
+	    // SB_SUPERLU_RANKTIME=1: every rank reports its own elapsed time for this apply.
+	    // reportSuperLUTiming below prints from rank 0 only, so the spread across ranks --
+	    // the thing that decides how long the others idle at the next collective -- has never
+	    // been visible.  stderr, not QDPIO::cout, because the latter is master-only.
+	    if (std::getenv("SB_SUPERLU_RANKTIME"))
+	    {
+	      std::fprintf(stderr, "SLURANK[%d] solve=%lld total=%.5f\n", (int)Layout::nodeNumber(),
+			   (long long)solve_call, timing.total());
+	      std::fflush(stderr);
+	    }
+
+	    // SB_SUPERLU_RESID=1: how well did this ILU(0) apply actually solve the local system?
+	    // Nothing on the preconditioner path measures it -- ||x - A_loc*y|| costs an extra
+	    // local matvec -- so it is off by default.  Until now the only figure available was a
+	    // lower bound of 0.927 inferred from the iit1 runs, and those report the residual
+	    // AFTER MR's optimal alpha scaling, which the bare configuration never applies.
+	    if (std::getenv("SB_SUPERLU_RESID"))
+	    {
+	      auto resid = op(y);	   // A_loc * y
+	      x.scale(-1).addTo(resid);	   // resid = A_loc*y - x
+	      auto nr = norm<1>(resid, op.order_t + order_cols);
+	      auto nx = norm<1>(x, op.order_t + order_cols);
+	      std::fprintf(stderr, "SLURESID[%d] solve=%lld rel_resid=%.4e\n",
+			   (int)Layout::nodeNumber(), (long long)solve_call,
+			   (double)max(div(nr, nx)));
+	      std::fflush(stderr);
+	    }
+
 	    if (superlu_timing_level > 0)
 	    {
 	      std::vector<double> chroma_times;

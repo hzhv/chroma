@@ -4,6 +4,7 @@
  * Propagator calculation in distillation
  */
 
+#include <cstdlib>
 #include "meas/inline/hadron/inline_inverter_test_superb_w.h"
 #include "actions/ferm/fermacts/fermact_factory_w.h"
 #include "actions/ferm/fermacts/fermacts_aggregate_w.h"
@@ -295,7 +296,12 @@ namespace Chroma
 	{
 	  const int max_rhs = params.param.contract.max_rhs[rhsi];
 
-	  const int t_source = 0;
+	  // SB_T_SOURCE moves the source timeslice; default 0, i.e. unchanged.  There is no XML
+	  // knob for this, and moving the source is how the "ranks factorize when the coarse
+	  // support reaches them" story gets falsified: the first busy rank group should move with
+	  // it.  Move by a whole coarse t-block (blocking is 4 in t, so 16, not 1).
+	  const char* t_source_env = std::getenv("SB_T_SOURCE");
+	  const int t_source = t_source_env ? std::atoi(t_source_env) : 0;
 	  const int spin_source = 0;
 
 	  for (int colorvec_src0 = 0, colorvec_src_step = std::min(max_rhs, num_vecs);

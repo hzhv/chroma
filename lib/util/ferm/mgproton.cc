@@ -7,6 +7,7 @@
 
 #include "util/ferm/mgproton.h"
 #include "chromabase.h"
+#include "util/ferm/mgproton_trace.h"
 #include "util/ferm/superb_contractions.h"
 #include "util/ferm/superb_options.h"
 
@@ -292,6 +293,9 @@ namespace Chroma
 		Verbosity verb = NoOutput, std::string prefix = "")
     {
       detail::log(1, prefix + " starting fgmres");
+      // Wall-clock trace (SB_MG_TRACE=<path>; off by default).  RAII so the early
+      // returns below still close the record.
+      mgtrace::Scope _mgtr("fgmres", prefix);
 
       // TODO: add optimizations for multiple operators
       if (op.order_t.size() > 0)
@@ -463,6 +467,8 @@ namespace Chroma
 	max_tol = max(div(normr, normr0));
 
 	// Report iteration
+	// Trace before the verbosity guard: the trace must not depend on <verbosity>.
+	_mgtr.iter(it, max_tol, detail::is_distribution_local(op.d.dist));
 	if (verb >= Detailed)
 	  QDPIO::cout << prefix << " MGPROTON FGMRES iteration #its.: " << it
 		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
@@ -490,6 +496,8 @@ namespace Chroma
       }
 
       // Report iteration
+      // Trace before the verbosity guard: the trace must not depend on <verbosity>.
+      _mgtr.finish(it, max_tol, detail::is_distribution_local(op.d.dist));
       if (verb >= JustSummary)
 	QDPIO::cout << prefix << " MGPROTON FGMRES summary #its.: " << it
 		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
@@ -537,6 +545,9 @@ namespace Chroma
 		  Verbosity verb = NoOutput, std::string prefix = "")
     {
       detail::log(1, prefix + " starting bicgstab");
+      // Wall-clock trace (SB_MG_TRACE=<path>; off by default).  RAII so the early
+      // returns below still close the record.
+      mgtrace::Scope _mgtr("bicgstab", prefix);
 
       // TODO: add optimizations for multiple operators
       if (op.order_t.size() > 0)
@@ -701,6 +712,8 @@ namespace Chroma
 	max_tol = max(div(normr, normr0));
 
 	// Report iteration
+	// Trace before the verbosity guard: the trace must not depend on <verbosity>.
+	_mgtr.iter(it, max_tol, detail::is_distribution_local(op.d.dist));
 	if (verb >= Detailed)
 	  QDPIO::cout << prefix << " MGPROTON BICGSTAB iteration #its.: " << it
 		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
@@ -726,6 +739,8 @@ namespace Chroma
       }
 
       // Report iteration
+      // Trace before the verbosity guard: the trace must not depend on <verbosity>.
+      _mgtr.finish(it, max_tol, detail::is_distribution_local(op.d.dist));
       if (verb >= JustSummary)
 	QDPIO::cout << prefix << " MGPROTON BICGSTAB summary #its.: " << it
 		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
@@ -763,6 +778,9 @@ namespace Chroma
 	    Verbosity verb = NoOutput, std::string prefix = "")
     {
       detail::log(1, prefix + " starting minimal residual");
+      // Wall-clock trace (SB_MG_TRACE=<path>; off by default).  RAII so the early
+      // returns below still close the record.
+      mgtrace::Scope _mgtr("mr", prefix);
 
       // TODO: add optimizations for multiple operators
       if (op.order_t.size() > 0)
@@ -834,7 +852,28 @@ namespace Chroma
       }
       {
 	Tracker _t_guard(std::string("mr guard ") + prefix);
-	if (max(normr0) == 0)
+	// SB_ZERORHS_PROBE=1: is the local right-hand side really zero before a rank's turn?
+	//
+	// `normr0` is a norm over the tensor, and the inner solver's tensors are Local
+	// (MPI_COMM_SELF), so for the inner solver this norm is rank-local and the early return
+	// below is a PER-RANK decision.  That is the link the staggered-factorization story rests
+	// on, and it is the only part of it that was never printed.  Bounded so a long run cannot
+	// be flooded.
+	const auto zr_normr0 = max(normr0);
+	if (std::getenv("SB_ZERORHS_PROBE"))
+	{
+	  static unsigned int zr_calls = 0;
+	  if (zr_calls < 600)
+	  {
+	    ++zr_calls;
+	    std::fprintf(stderr, "SBZRHS[%d] call=%u %s dist=%s normr0=%.6e ret=%d\n",
+			 (int)Layout::nodeNumber(), zr_calls, prefix.c_str(),
+			 op.d.dist == Local ? "local" : "dist",
+			 static_cast<double>(zr_normr0), zr_normr0 == 0 ? 1 : 0);
+	    std::fflush(stderr);
+	  }
+	}
+	if (zr_normr0 == 0)
 	  return;
       }
       for (it = 0; it < max_its;)
@@ -961,6 +1000,8 @@ namespace Chroma
 	}
 
 	// Report iteration
+	// Trace before the verbosity guard: the trace must not depend on <verbosity>.
+	_mgtr.iter(it, max_tol, detail::is_distribution_local(op.d.dist));
 	if (verb >= Detailed)
 	  QDPIO::cout << prefix << " MGPROTON MR iteration #its.: " << it
 		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
@@ -986,6 +1027,8 @@ namespace Chroma
       }
 
       // Report iteration
+      // Trace before the verbosity guard: the trace must not depend on <verbosity>.
+      _mgtr.finish(it, max_tol, detail::is_distribution_local(op.d.dist));
       if (verb >= JustSummary)
 	QDPIO::cout << prefix << " MGPROTON MR summary #its.: " << it
 		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
@@ -1034,6 +1077,9 @@ namespace Chroma
 		Verbosity verb = NoOutput, std::string prefix = "")
     {
       detail::log(1, prefix + " starting jacobi method");
+      // Wall-clock trace (SB_MG_TRACE=<path>; off by default).  RAII so the early
+      // returns below still close the record.
+      mgtrace::Scope _mgtr("jacobi", prefix);
 
       if (op.order_t.size() > 0)
 	throw std::runtime_error("Not implemented");
@@ -1100,6 +1146,8 @@ namespace Chroma
 	auto normr = norm<1>(r, op.order_t + order_cols);
 	max_tol = max(div(normr, normr0));
 
+	// Trace before the verbosity guard: the trace must not depend on <verbosity>.
+	_mgtr.iter(it, max_tol, detail::is_distribution_local(op.d.dist));
 	if (verb >= Detailed)
 	  QDPIO::cout << prefix << " JACOBI iteration #its.: " << it
 		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
@@ -1119,6 +1167,8 @@ namespace Chroma
 	  throw std::runtime_error("jacobi didn't converge");
       }
 
+      // Trace before the verbosity guard: the trace must not depend on <verbosity>.
+      _mgtr.finish(it, max_tol, detail::is_distribution_local(op.d.dist));
       if (verb >= JustSummary)
 	QDPIO::cout << prefix << " JACOBI summary #its.: " << it
 		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
@@ -1161,6 +1211,9 @@ namespace Chroma
 	     bool passing_initial_guess = false, Verbosity verb = NoOutput, std::string prefix = "")
     {
       detail::log(1, prefix + " starting minimal residual");
+      // Wall-clock trace (SB_MG_TRACE=<path>; off by default).  RAII so the early
+      // returns below still close the record.
+      mgtrace::Scope _mgtr("gcr", prefix);
 
       // TODO: add optimizations for multiple operators
       if (op.order_t.size() > 0)
@@ -1316,6 +1369,8 @@ namespace Chroma
 	max_tol = max(div(normr, normr0));
 
 	// Report iteration
+	// Trace before the verbosity guard: the trace must not depend on <verbosity>.
+	_mgtr.iter(it, max_tol, detail::is_distribution_local(op.d.dist));
 	if (verb >= Detailed)
 	  QDPIO::cout << prefix << " MGPROTON GCR iteration #its.: " << it
 		      << " max rel. residual: " << detail::tostr(max_tol, 2) << std::endl;
@@ -1353,6 +1408,8 @@ namespace Chroma
       }
 
       // Report iteration
+      // Trace before the verbosity guard: the trace must not depend on <verbosity>.
+      _mgtr.finish(it, max_tol, detail::is_distribution_local(op.d.dist));
       if (verb >= JustSummary)
 	QDPIO::cout << prefix << " MGPROTON GCR summary #its.: " << it
 		    << " max rel. residual: " << detail::tostr(max_tol, 2) << " matvecs: " << nops
@@ -3363,6 +3420,31 @@ namespace Chroma
 	// Get options
 	bool with_correction = getOption<bool>(ops, "with_correction", false);
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
+
+	// SB_PART_PROBE=1: print this rank's actual slice of the operator's domain.  The coarse
+	// process grid is chosen by superbblas::partitioning_distributed_procs, which places
+	// factors on the largest local dimension, so the shape cannot be read off `-geom`.  Which
+	// ranks share a coarse t-slab is what decides the size of the factorization "turns".
+	if (std::getenv("SB_PART_PROBE") && op.d.p)
+	{
+	  const int me = (int)Layout::nodeNumber();
+	  if (me >= 0 && me < (int)op.d.p->p.size())
+	  {
+	    const auto& part = op.d.p->p[me];
+	    std::ostringstream os;
+	    os << "SBPART[" << me << "] " << prefix << " order=" << op.d.order << " dim=";
+	    for (std::size_t k = 0; k < op.d.order.size(); ++k)
+	      os << (k ? "," : "") << op.d.dim[k];
+	    os << " from=";
+	    for (std::size_t k = 0; k < op.d.order.size(); ++k)
+	      os << (k ? "," : "") << part[0][k];
+	    os << " size=";
+	    for (std::size_t k = 0; k < op.d.order.size(); ++k)
+	      os << (k ? "," : "") << part[1][k];
+	    std::fprintf(stderr, "%s\n", os.str().c_str());
+	    std::fflush(stderr);
+	  }
+	}
 
 	Tracker _t(std::string("setup dd solver ") + prefix);
 
@@ -5878,7 +5960,7 @@ namespace Chroma
 	// Keep the explicit sparse conversion and the redistribution schedules in shared setup
 	// objects. SuperLU's factor storage also lives with the solver, so repeated applications
 	// reuse the first LU factorization and only solve new right-hand sides.
-	return Operator<NOp, ComplexD>{
+	Operator<NOp, ComplexD> superlu_solver_op{
 	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
 	    // Declared first so its destructor fires LAST, after stat_scope's (PStatFree):
 	    // catches context corruption from the very end of the lambda.
@@ -6203,6 +6285,36 @@ namespace Chroma
 	  DenseOperator(),
 	  op.preferred_col_ordering,
 	  false};
+
+	// SB_EAGER_FACT=1: pay the one-time numerical factorization here, on every rank at once,
+	// instead of letting each rank pay it lazily at the first application that hands it a
+	// non-zero right-hand side.
+	//
+	// Why it is worth ~3 s: under the `mr(max_its=1)` wrapper a rank whose local coarse RHS is
+	// still zero returns at mr()'s `max(normr0) == 0` guard and never reaches SuperLU, so the
+	// 16 factorizations end up spread over four coarse iterations as the support arrives
+	// (measured order: ranks 0-3, 12-15, 4-7, 8-11).  `SuperLU(ilu0)` applied directly has no
+	// such guard, factorizes on all ranks in one go, and does not pay this.  Full evidence in
+	// docs/AGENT_PROMPT_SUPERLU_STAGGER.md.
+	//
+	// A ZERO right-hand side is enough, because the factorization depends on the matrix and
+	// not on the RHS -- that is exactly why the direct path factorizes on ranks whose local
+	// RHS is still zero.  So the warm-up draws no random numbers and cannot perturb the
+	// production RHS, the initial guess or the random sequence; it only fills the solver's
+	// factor storage, which later applications reuse (`fact=FACTORED`).
+	if (std::getenv("SB_EAGER_FACT"))
+	{
+	  Tracker _t_eager(std::string("superlu eager factorization ") + prefix);
+	  auto warm_x = superlu_solver_op.template make_compatible_dom<NOp + 1>("n", {{'n', 1}});
+	  warm_x.set_zero();
+	  auto warm_y = superlu_solver_op.template make_compatible_img<NOp + 1>("n", {{'n', 1}});
+	  warm_y.set_zero();
+	  superlu_solver_op(warm_x, warm_y);
+	  std::fprintf(stderr, "SBEAGER[%d] %s factorized\n", (int)Layout::nodeNumber(),
+		       prefix.c_str());
+	  std::fflush(stderr);
+	}
+	return superlu_solver_op;
 #  endif
       }
 
@@ -6877,6 +6989,10 @@ namespace Chroma
 	QDPIO::cout << "Setting up MGPROTON invertor..." << std::endl;
 	Tracker _t("setup mgproton");
 
+	// Start of the run clock.  elapsed_run_s is measured from here, so it covers setup
+	// (null vectors, coarse operator, SuperLU factorisation) and every following inversion.
+	mgtrace::markRunStart();
+
 	// Parse XML with the inverter options
 	std::shared_ptr<Options> ops = getOptionsFromXML(broadcast(invParam.xml));
 
@@ -6902,6 +7018,10 @@ namespace Chroma
 
 	QDPIO::cout << "MGPROTON invertor ready; setup time: "
 		    << detail::tostr(_t.stopAndGetElapsedTime()) << " s" << std::endl;
+
+	// Setup is finished: from here on, a solver opening at depth 0 starts a new inversion and
+	// resets elapsed_solve_s.  Setup-phase rows keep an empty elapsed_solve_s.
+	mgtrace::setPhaseSolve();
       }
       else
       {

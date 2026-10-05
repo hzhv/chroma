@@ -796,7 +796,7 @@ namespace Chroma
 	max_residual_updates = (std::is_same<COMPLEX, double>::value ||
 				std::is_same<COMPLEX, std::complex<double>>::value)
 				 ? 100
-				 : 100; // ???
+				 : 100;
 
       // Check that the operator is compatible with the input and output vectors
       if (!op.d.is_compatible(x) || !op.d.is_compatible(y))
@@ -818,115 +818,38 @@ namespace Chroma
       unsigned int nops = 0, nprecs = 0;
 
       // Compute residual, r = x - op * y
-      //
-      // Everything from here to the loop is per-CALL, not per-iteration: four temporaries
-      // (r, normr, p, kr), the initial residual, and the max(normr0) guard.  On the coarse
-      // domain solve mr() is entered 463 times and runs a single iteration each time, so any
-      // fixed entry cost is paid in full 463 times and amortised over nothing.  The whole
-      // loop body is already instrumented -- prec, op, norm, max, alpha, axpy -- and those
-      // sum to 1.10 ms against a 14.89 ms residual, so the time is outside the loop.
       Tensor<NOp + 1, COMPLEX> r;
-      Tensor<1, typename detail::real_type<COMPLEX>::type> normr0, normr;
-      Tensor<NOp + 1, COMPLEX> p, kr;
-      unsigned int it = 0;		 ///< iteration number
-      double max_tol = HUGE_VAL;	 ///< maximum residual norm
-      unsigned int residual_updates = 0; ///< number of residual updates
+      if (passing_initial_guess)
       {
-	Tracker _t_entry(std::string("mr entry ") + prefix);
-	if (passing_initial_guess)
-	{
-	  r = op(y).scale(-1);
-	  nops += num_cols;
-	}
-	else
-	{
-	  r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim());
-	  r.set_zero();
-	  y.set_zero();
-	}
-	x.addTo(r);
-	normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
-	normr = normr0.clone();		 ///< residual norms
-	p = r.make_compatible();	 ///< p will hold A * prec * r
-	kr = prec ? prec.template make_compatible_img<NOp + 1>(order_cols, x.kvdim()) : r;
+	r = op(y).scale(-1);
+	nops += num_cols;
       }
+      else
       {
-	Tracker _t_guard(std::string("mr guard ") + prefix);
-	// SB_ZERORHS_PROBE=1: is the local right-hand side really zero before a rank's turn?
-	//
-	// `normr0` is a norm over the tensor, and the inner solver's tensors are Local
-	// (MPI_COMM_SELF), so for the inner solver this norm is rank-local and the early return
-	// below is a PER-RANK decision.  That is the link the staggered-factorization story rests
-	// on, and it is the only part of it that was never printed.  Bounded so a long run cannot
-	// be flooded.
-	const auto zr_normr0 = max(normr0);
-	if (std::getenv("SB_ZERORHS_PROBE"))
-	{
-	  static unsigned int zr_calls = 0;
-	  if (zr_calls < 600)
-	  {
-	    ++zr_calls;
-	    std::fprintf(stderr, "SBZRHS[%d] call=%u %s dist=%s normr0=%.6e ret=%d\n",
-			 (int)Layout::nodeNumber(), zr_calls, prefix.c_str(),
-			 op.d.dist == Local ? "local" : "dist",
-			 static_cast<double>(zr_normr0), zr_normr0 == 0 ? 1 : 0);
-	    std::fflush(stderr);
-	  }
-	}
-	if (zr_normr0 == 0)
-	  return;
+	r = op.template make_compatible_img<NOp + 1>(order_cols, x.kvdim());
+	r.set_zero();
+	y.set_zero();
       }
+      x.addTo(r);
+      auto normr0 = norm<1>(r, op.order_t + order_cols); // type std::vector<real of T>
+      if (max(normr0) == 0)
+	return;
+
+      // Do the iterations
+      auto normr = normr0.clone();		///< residual norms
+      unsigned int it = 0;			///< iteration number
+      double max_tol = HUGE_VAL;		///< maximum residual norm
+      unsigned int residual_updates = 0;	///< number of residual updates
+      auto p = r.make_compatible();		///< p will hold A * prec * r
+      auto kr = prec ? prec.template make_compatible_img<NOp + 1>(order_cols, x.kvdim())
+                     : r; ///< kr will hold prec * r
       for (it = 0; it < max_its;)
       {
 	// kr = prec * r
 	if (prec)
 	{
-	  // SB_PREC_PROBE=1: per-rank wall time of the preconditioner application.
-	  //
-	  // The barrier probe below showed ranks arriving at the outer matvec spread over ~1.2 s
-	  // per iteration in iit1 against ~0.045 s in bare, with the last arrival ROTATING rather
-	  // than pinned to one slow rank (mean wait 0.775-0.854 s, only 10% apart across ranks).
-	  // SuperLU's own per-rank time is balanced (16% spread, 0.2 s accumulated) and the inner
-	  // solver's superbblas kernels account for 1.4%, so the spread is produced somewhere in
-	  // this call that no existing timer covers.  Printing the duration per rank separates
-	  // "the call itself varies" from "the spread was inherited from earlier".
-	  const bool prec_probe = std::getenv("SB_PREC_PROBE") && op.d.dist != Local;
-	  const double t_prec0 = prec_probe ? detail::w_time() : 0.0;
 	  prec(r, kr);
-	  if (prec_probe)
-	  {
-	    const double t_prec1 = detail::w_time();
-	    std::fprintf(stderr, "SBPREC[%d] it=%u t0=%.6f dur=%.6f\n", (int)Layout::nodeNumber(),
-			 it, t_prec0, t_prec1 - t_prec0);
-	    std::fflush(stderr);
-	  }
 	  nprecs += num_cols;
-	}
-
-	// SB_BARRIER_PROBE=1: measure how far apart the ranks arrive at the outer matvec.
-	//
-	// iit1 spends 23.6 s in `distributed BSR matvec/MPI wait` against bare's 0.39 s over the
-	// same 30 calls, and the obvious explanation -- SuperLU load imbalance exposed by the
-	// inner solver -- has been measured and ruled out: the per-rank SuperLU spread is 16.8%
-	// (bare) vs 15.5% (iit1), worth 0.55 s vs 0.75 s accumulated, nowhere near 23 s.
-	//
-	// An explicit barrier separates the two remaining possibilities.  Large, spread-out
-	// barrier times mean the ranks really do arrive at different moments and the halo wait is
-	// just where that shows up; near-zero barrier times mean arrival is synchronous and the
-	// 23 s is spent inside the exchange itself, not waiting for a straggler.
-	//
-	// The `dist != Local` guard is essential: mr() serves BOTH the outer solver and the
-	// per-rank inner solver, and the inner one runs on MPI_COMM_SELF tensors.  A global
-	// barrier there deadlocks as soon as one rank takes a different path (e.g. the
-	// `max(normr0) == 0` early return above), because the ranks then disagree on how many
-	// barriers to execute -- which is exactly how the first version of this probe hung iit1.
-	if (std::getenv("SB_BARRIER_PROBE") && op.d.dist != Local)
-	{
-	  const double t_pre = detail::w_time();
-	  MPI_Barrier(MPI_COMM_WORLD);
-	  std::fprintf(stderr, "SBSKEW[%d] it=%u barrier=%.5f\n", (int)Layout::nodeNumber(), it,
-		       detail::w_time() - t_pre);
-	  std::fflush(stderr);
 	}
 
 	// p = A * kr
@@ -934,21 +857,14 @@ namespace Chroma
 	nops += num_cols;
 
 	// alpha = (p' * r) / (p' * p)
-	Tensor<1, COMPLEX> alpha;
-	{
-	  Tracker _t_alpha(std::string("mr alpha ") + prefix);
-	  alpha =
-	    div(contract<1>(r, p.conj(), order_rows), contract<1>(p, p.conj(), order_rows));
-	}
+	auto alpha =
+	  div(contract<1>(r, p.conj(), order_rows), contract<1>(p, p.conj(), order_rows));
 
-	{
-	  Tracker _t_axpy(std::string("mr axpy ") + prefix);
-	  // y = y + alpha * kr
-	  contract<NOp + 1>(kr, alpha, "", AddTo, y);
+	// y = y + alpha * kr
+	contract<NOp + 1>(kr, alpha, "", AddTo, y);
 
-	  // r = r - alpha * p
-	  contract<NOp + 1>(p.scale(-1), alpha, "", AddTo, r);
-	}
+	// r = r - alpha * p
+	contract<NOp + 1>(p.scale(-1), alpha, "", AddTo, r);
 
 	// Update residual if needed
 	if (residual_updates < max_residual_updates)
@@ -964,20 +880,7 @@ namespace Chroma
 	}
 
 	// Compute the norm
-	//
-	// Instrumentation for the residual left over after subtracting every tracked child of
-	// `mr <prefix>`.  On the coarse domain solve that residual is 14.9 ms per call against a
-	// 4.6 ms total when SuperLU is invoked directly, and three explanations have been ruled
-	// out by measurement: collective printing (NoOutput left it at 14.98 ms), cross-rank
-	// reduction (compatible_replicated_distribution returns Local unchanged), and async queue
-	// drainage (CUDA_LAUNCH_BLOCKING=1 left it at 14.85 ms).  What remains untracked in this
-	// loop is norm<1>, div, and max -- max copies to the host via make_sure(none, OnHost, ...)
-	// on every call.  These three Trackers split them apart.
-	Tensor<1, typename detail::real_type<COMPLEX>::type> normr;
-	{
-	  Tracker _t_norm(std::string("mr norm ") + prefix);
-	  normr = norm<1>(r, op.order_t + order_cols);
-	}
+	auto normr = norm<1>(r, op.order_t + order_cols);
 
 	// Show residual error
 	if (superbblas::getDebugLevel() > 0)
@@ -994,10 +897,7 @@ namespace Chroma
 	}
 
 	// Get the worse tolerance
-	{
-	  Tracker _t_max(std::string("mr max ") + prefix);
-	  max_tol = max(div(normr, normr0));
-	}
+	max_tol = max(div(normr, normr0));
 
 	// Report iteration
 	// Trace before the verbosity guard: the trace must not depend on <verbosity>.

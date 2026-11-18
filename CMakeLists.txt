@@ -29,6 +29,7 @@ option(Chroma_ENABLE_OPENMP "Enable OpenMP" OFF)
 option(Chroma_ENABLE_SUPERBBLAS  "Enable tasks using Superbblas" OFF)
 option(Chroma_ENABLE_SUPERLU_DIST "Enable MGPROTON SuperLU_DIST solver" OFF)
 option(Chroma_SUPERLU_NVSHMEM "SuperLU_DIST is built with NVSHMEM and supports several solver instances per process" OFF)
+option(Chroma_ENABLE_LUPANAR "Enable the MGPROTON LUPANAR solver (block ILU(0) with GPU triangular solves, CUDA)" OFF)
 option(Chroma_ENABLE_PRIMME  "Build with PRIMME" OFF)
 option(Chroma_ENABLE_CUDA  "Build with CUDA" OFF)
 option(Chroma_ENABLE_ROCM  "Build with ROCM" OFF)
@@ -65,6 +66,15 @@ set(PRIMME_DIR "" CACHE PATH "path to PRIMME installation")
 ##################
 # Configuration
 ##################
+
+if( Chroma_ENABLE_LUPANAR )
+  # LUPANAR's triangular solves are CUDA sources. nvcc compiles their host code with the C++ compiler,
+  # so an MPI compiler wrapper as CMAKE_CXX_COMPILER gives them MPI too.
+  if( NOT CMAKE_CUDA_HOST_COMPILER )
+    set(CMAKE_CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
+  endif()
+  enable_language(CUDA)
+endif()
 
 if( Chroma_ENABLE_JIT_CLOVER )
  set(BUILD_JIT_CLOVER_TERM 1)
@@ -232,6 +242,12 @@ if( Chroma_ENABLE_SUPERBBLAS )
   if( Chroma_SUPERLU_NVSHMEM )
     set(BUILD_SUPERLU_NVSHMEM 1)
   endif()
+  if( Chroma_ENABLE_LUPANAR )
+    if( NOT (QDP_BACKEND_CUDA OR Chroma_ENABLE_CUDA) )
+      message(FATAL_ERROR "Chroma_ENABLE_LUPANAR requires CUDA (a QDP-JIT CUDA build or Chroma_ENABLE_CUDA)")
+    endif()
+    set(BUILD_LUPANAR 1)
+  endif()
 
   # Deal with PRIMME
   if( Chroma_ENABLE_PRIMME )
@@ -245,6 +261,9 @@ if( Chroma_ENABLE_SUPERLU_DIST AND NOT Chroma_ENABLE_SUPERBBLAS )
 endif()
 if( Chroma_SUPERLU_NVSHMEM AND NOT Chroma_ENABLE_SUPERLU_DIST )
   message(FATAL_ERROR "Chroma_SUPERLU_NVSHMEM requires Chroma_ENABLE_SUPERLU_DIST")
+endif()
+if( Chroma_ENABLE_LUPANAR AND NOT Chroma_ENABLE_SUPERBBLAS )
+  message(FATAL_ERROR "Chroma_ENABLE_LUPANAR requires Chroma_ENABLE_SUPERBBLAS")
 endif()
 
 

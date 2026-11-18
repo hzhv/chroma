@@ -80,6 +80,17 @@ int nvshmem_n_pes(void);
 #  endif // BUILD_SUPERLU_NVSHMEM
 #endif
 
+#ifdef BUILD_LUPANAR
+// LUPANAR (BUILD_LUPANAR): block ILU(0) with GPU triangular solves, `type=lupanar`; independent of
+// SuperLU_DIST.
+#  include "util/ferm/lupanar.h"
+#  include <cuda.h> // driver API: cuCtxGetCurrent/cuCtxSetCurrent
+#  include <cuda_runtime.h>
+#  ifndef BUILD_SUPERLU_DIST
+typedef int int_t; // index type of the lattice numbering shared with the SuperLU_DIST glue
+#  endif
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -5004,6 +5015,8 @@ namespace Chroma
 	return level;
       }
 
+#  endif // BUILD_SUPERLU_DIST
+#  if defined(BUILD_SUPERLU_DIST) || defined(BUILD_LUPANAR) // shared with the LUPANAR glue
       inline double superLUNow()
       {
 	return detail::w_time();
@@ -5027,6 +5040,8 @@ namespace Chroma
 	}
       };
 
+#  endif // BUILD_SUPERLU_DIST || BUILD_LUPANAR
+#  ifdef BUILD_SUPERLU_DIST
       struct SuperLUPhaseTiming {
 	const char* name = nullptr;
 	int phase = 0;
@@ -5044,11 +5059,15 @@ namespace Chroma
 	}
       }
 
+#  endif // BUILD_SUPERLU_DIST
+#  if defined(BUILD_SUPERLU_DIST) || defined(BUILD_LUPANAR) // shared with the LUPANAR glue
       inline void appendTimingField(std::ostringstream& out, const char* name, double value)
       {
 	out << ' ' << name << '=' << std::fixed << std::setprecision(4) << value << 's';
       }
 
+#  endif // BUILD_SUPERLU_DIST || BUILD_LUPANAR
+#  ifdef BUILD_SUPERLU_DIST
       inline void reportSuperLUTiming(const std::string& prefix, MPI_Comm comm, bool local_superlu,
 				      int timing_level, std::size_t nrhs, int_t n, int_t m_loc,
 				      int_t nnz_loc, const std::vector<double>& chroma_times,
@@ -5637,6 +5656,8 @@ namespace Chroma
 	}
       };
 
+#  endif // BUILD_SUPERLU_DIST
+#  if defined(BUILD_SUPERLU_DIST) || defined(BUILD_LUPANAR) // shared with the LUPANAR glue
       template <std::size_t NOp>
       int_t flattenSuperLUIndex(const Coor<NOp>& anchor, const Coor<NOp>& dense,
 				const Coor<NOp>& dims, const std::array<int_t, NOp>& strides,
@@ -5891,6 +5912,8 @@ namespace Chroma
 	return labels;
       }
 
+#  endif // BUILD_SUPERLU_DIST || BUILD_LUPANAR
+#  ifdef BUILD_SUPERLU_DIST
       template <std::size_t NOp>
       SuperLUMatrixSetup<NOp>
       buildSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
@@ -6104,6 +6127,8 @@ namespace Chroma
 	return setup;
       }
 
+#  endif // BUILD_SUPERLU_DIST
+#  if defined(BUILD_SUPERLU_DIST) || defined(BUILD_LUPANAR) // shared with the LUPANAR glue
       template <std::size_t NOp>
       bool getLocalSuperLUCoordinate(const Coor<NOp>& global_anchor, const Coor<NOp>& dense,
 				     const Coor<NOp>& local_from, const Coor<NOp>& local_size,
@@ -6121,6 +6146,8 @@ namespace Chroma
 	return true;
       }
 
+#  endif // BUILD_SUPERLU_DIST || BUILD_LUPANAR
+#  ifdef BUILD_SUPERLU_DIST
       template <std::size_t NOp>
       SuperLUMatrixSetup<NOp>
       buildLocalSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
@@ -6830,6 +6857,597 @@ namespace Chroma
 	throw std::runtime_error("getSuperLUSolver: only ComplexD is supported");
       }
 
+#  ifdef BUILD_LUPANAR
+      inline int getLupanarTimingLevel()
+      {
+	static int level = []() {
+	  const char* env = std::getenv("SB_LUPANAR_TIMING");
+	  if (!env)
+	    return 0;
+	  if (std::strcmp(env, "true") == 0 || std::strcmp(env, "TRUE") == 0 ||
+	      std::strcmp(env, "yes") == 0 || std::strcmp(env, "YES") == 0 ||
+	      std::strcmp(env, "on") == 0 || std::strcmp(env, "ON") == 0)
+	    return 1;
+	  return std::max(0, std::atoi(env));
+	}();
+	return level;
+      }
+
+      /// Makes a CUDA context current on this thread while in scope.  LUPANAR keeps its factors and
+      /// its stream in the context that was current when the solver was set up and never selects a
+      /// device itself: the contexts belong to superbblas and QDP-JIT.
+
+      struct LupanarCudaContextGuard {
+	CUcontext prev = nullptr;
+	bool switched = false;
+
+	explicit LupanarCudaContextGuard(CUcontext ctx)
+	{
+	  if (cuCtxGetCurrent(&prev) != CUDA_SUCCESS)
+	    throw std::runtime_error("LUPANAR: cuCtxGetCurrent failed");
+	  if (prev == ctx)
+	    return;
+	  if (cuCtxSetCurrent(ctx) != CUDA_SUCCESS)
+	    throw std::runtime_error("LUPANAR: cuCtxSetCurrent failed");
+	  switched = true;
+	}
+
+	~LupanarCudaContextGuard()
+	{
+	  if (switched)
+	    cuCtxSetCurrent(prev);
+	}
+      };
+
+      template <std::size_t NOp>
+      struct LupanarState {
+	lupanar::Solver* solver = nullptr;
+	MPI_Comm comm = MPI_COMM_SELF;
+	bool local = false;      ///< one solver per rank on its domain (inside `dd`)
+	std::size_t nloc = 0;    ///< sites of this rank
+	std::size_t bs = 0;      ///< values per site
+	long long n = 0;         ///< scalar unknowns on all ranks
+	long long max_m_loc = 0; ///< largest number of scalar unknowns on a rank
+	/// Local coordinates, in the RHS tensor and in the solution tensor, of the value
+	/// (site*bs + a) that LUPANAR takes and returns
+	std::vector<Coor<NOp>> x_coor, y_coor;
+	/// Offsets of those values for the local sizes seen in the last application
+	std::vector<std::size_t> x_off, y_off;
+	Coor<NOp> x_size{{}}, y_size{{}};
+	CUcontext cuda_ctx = nullptr;
+	std::size_t solves = 0;
+
+	LupanarState() = default;
+	LupanarState(const LupanarState&) = delete;
+	LupanarState& operator=(const LupanarState&) = delete;
+
+	~LupanarState()
+	{
+	  if (!solver)
+	    return;
+	  // Free the factors in their context; never throw from here
+	  CUcontext prev = nullptr;
+	  const bool switched = cuCtxGetCurrent(&prev) == CUDA_SUCCESS && prev != cuda_ctx &&
+				cuCtxSetCurrent(cuda_ctx) == CUDA_SUCCESS;
+	  try
+	  {
+	    lupanar::destroy(solver);
+	  } catch (...)
+	  {
+	  }
+	  if (switched)
+	    cuCtxSetCurrent(prev);
+	}
+      };
+#  endif // BUILD_LUPANAR
+
+      /// Returns the block ILU(0) preconditioner of LUPANAR on the GPU,
+      ///   y = U \ (L \ x),   L U = (D + L_A) D^{-1} (D + U_A),   d_i = a_ii - sum_{l<i} a_il d_l^{-1} a_li,
+      /// with one dense block per lattice site.  The sites are eliminated in the lexicographic order
+      /// of the physical lattice (x fastest, then y, z, t; see SuperLUSiteNumbering), as `superlu` with
+      /// ilu_level=0 and colperm=natural does.  It is the textbook ILU(0); SuperLU_DIST's ILU(0) adds
+      /// part of the fill it drops to the next block (zscatter_u), so the two differ slightly.
+      ///
+      /// For an operator distributed over the ranks the solve is global and collective.  For a local
+      /// operator (inside `dd`) every rank solves its own domain, without the couplings that leave it.
+      ///
+      /// \param op: operator to make the preconditioner of
+      /// \param ops: options
+      ///   - prefix: name in the timing lines
+      ///   - kernel: auto (default: simt for one right-hand side, tc for more), simt, tc
+      ///   - grid: cap (default: thread blocks for the widest level), full (fill the GPU)
+      ///   - timing: print a timing line per application (also with SB_LUPANAR_TIMING=1)
+      ///   - power: furthest neighbor, if the operator has to be made explicit
+      /// \param prec_: unsupported
+
+      template <std::size_t NOp>
+      Operator<NOp, ComplexD> getLupanarSolver(Operator<NOp, ComplexD> op, const Options& ops,
+					       Operator<NOp, ComplexD> prec_)
+      {
+#  ifndef BUILD_LUPANAR
+	(void)op;
+	(void)ops;
+	(void)prec_;
+	throw std::runtime_error(
+	  "getLupanarSolver: requested `type=lupanar`, but Chroma was built without "
+	  "LUPANAR support");
+#  else
+	if (prec_)
+	  throw std::runtime_error("getLupanarSolver: unsupported input preconditioner");
+	if (!op.d.is_compatible(op.i))
+	  throw std::runtime_error("getLupanarSolver: only square operators are supported");
+	if (!op.order_t.empty())
+	  throw std::runtime_error("getLupanarSolver: tensor-transposed operators are unsupported");
+
+	enum LupanarKernel { LupanarAuto = 0, LupanarSimt = 1, LupanarTC = 2 };
+	static const std::map<std::string, LupanarKernel> kernelMap{
+	  {"auto", LupanarAuto}, {"simt", LupanarSimt}, {"tc", LupanarTC}};
+	enum LupanarGrid { LupanarCap = 0, LupanarFull = 1 };
+	static const std::map<std::string, LupanarGrid> gridMap{{"cap", LupanarCap},
+								{"full", LupanarFull}};
+
+	const std::string prefix = getOption<std::string>(ops, "prefix", "");
+	const int timing_level =
+	  std::max(getLupanarTimingLevel(), getOption<bool>(ops, "timing", false) ? 1 : 0);
+	lupanar::Options lupanar_options;
+	lupanar_options.kernel = (int)getOption<LupanarKernel>(ops, "kernel", kernelMap, LupanarAuto);
+	lupanar_options.grid = (int)getOption<LupanarGrid>(ops, "grid", gridMap, LupanarCap);
+	Tracker _t(std::string("setup LUPANAR solver ") + prefix);
+
+	const bool local =
+	  op.d.dist == Glocal || op.d.dist == Local || op.i.dist == Glocal || op.i.dist == Local;
+	if (local && !((op.d.dist == Glocal || op.d.dist == Local) &&
+		       (op.i.dist == Glocal || op.i.dist == Local)))
+	  throw std::runtime_error(
+	    "getLupanarSolver: a local solver requires local domain and image spaces");
+	const MPI_Comm comm = local ? MPI_COMM_SELF : MPI_COMM_WORLD;
+	int comm_size = 0;
+	if (MPI_Comm_size(comm, &comm_size) != MPI_SUCCESS)
+	  throw std::runtime_error("getLupanarSolver: MPI_Comm_size failed");
+	if (!local && comm_size != Layout::numNodes())
+	  throw std::runtime_error(
+	    "getLupanarSolver: the communicator size must match Layout::numNodes()");
+
+	// Explicit sparse operator, as getSuperLUSolver
+	SpTensor<NOp, NOp, ComplexD> sp;
+	remap rd;
+	if (op.sp)
+	{
+	  auto sp0 = op.sp;
+	  if (!sp0.is_kronecker())
+	  {
+	    sp = sp0;
+	    rd = op.rd;
+	  }
+	}
+	if (!sp)
+	{
+	  unsigned int power =
+	    getOption<unsigned int>(ops, "power", getFurthestNeighborDistance(op));
+	  auto explicit_op =
+	    cloneOperatorToSpTensor(op, power, RowMajor, false, std::string("LUPANAR ") + prefix);
+	  sp = explicit_op.first;
+	  rd = explicit_op.second;
+	}
+	if (!sp)
+	  throw std::runtime_error("getLupanarSolver: failed to build an explicit sparse operator");
+	if (sp.is_kronecker())
+	  throw std::runtime_error("getLupanarSolver: Kronecker sparse format is unsupported");
+	if (rd.empty())
+	  for (unsigned int p = 0; p < NOp; ++p)
+	    rd[sp.i.order[p]] = sp.d.order[p];
+
+	auto state = std::make_shared<LupanarState<NOp>>();
+	state->comm = comm;
+	state->local = local;
+	lupanar::Matrix A;
+	A.comm = comm;
+	{
+	  // Rows of this rank, taken from the sparse operator as the SuperLU_DIST glue does
+	  const auto local_blocks = extractExplicitLocalBlockRows(sp, rd, "LUPANAR");
+	  const std::size_t bs = local_blocks.bs;
+	  if (bs == 0 || local_blocks.dense_img_coors.size() != bs ||
+	      local_blocks.dense_dom_coors.size() != bs)
+	    throw std::runtime_error("getLupanarSolver: unexpected dense block");
+
+	  // Number the sites: the whole lattice for the global solver, the rank's domain for the
+	  // local one (buildSuperLUMatrixSetup and buildLocalSuperLUMatrixSetup)
+	  const Coor<NOp> zero{{}};
+	  const Coor<NOp> img_from =
+	    !local || op.i.dist == Local ? zero : op.i.p->localFrom();
+	  const Coor<NOp> dom_from =
+	    !local || op.d.dist == Local ? zero : op.d.p->localFrom();
+	  const Coor<NOp> img_size =
+	    !local ? kvcoors<NOp>(local_blocks.sp.i.order, local_blocks.sp.i.kvdim())
+		   : (op.i.dist == Local ? op.i.size : op.i.p->localSize());
+	  const Coor<NOp> dom_size =
+	    !local ? kvcoors<NOp>(local_blocks.sp.d.order, local_blocks.sp.d.kvdim())
+		   : (op.d.dist == Local ? op.d.size : op.d.p->localSize());
+	  const Coor<NOp> img_global = local ? op.i.size : img_size;
+	  const Coor<NOp> dom_global = local ? op.d.size : dom_size;
+	  const SuperLUSiteNumbering<NOp> img_num(local_blocks.sp.i.order, img_from, img_size,
+						  img_global, op.imgLayout,
+						  "LUPANAR " + prefix + " image");
+	  const SuperLUSiteNumbering<NOp> dom_num(getSuperLUDomainLabels(local_blocks), dom_from,
+						  dom_size, dom_global, op.domLayout,
+						  "LUPANAR " + prefix + " domain");
+	  if ((std::size_t)img_num.bs != bs || (std::size_t)dom_num.bs != bs)
+	    throw std::runtime_error("getLupanarSolver: " + prefix +
+				     ": the non-lattice labels have to be the dense site block");
+
+	  // Rows.  Every site is a block of bs values; `pr[b]` is the place in the block of the
+	  // dense index b of the image, `pc[b]` of the domain
+	  std::vector<std::size_t> pr(bs, bs), pc(bs, bs);
+	  std::vector<std::size_t> kept; ///< rows of local_blocks in the matrix
+	  std::map<long long, std::size_t> lrow_of_site;
+	  std::vector<Coor<NOp>> lc(bs);
+	  for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
+	  {
+	    std::size_t inside = 0;
+	    for (std::size_t b = 0; b < bs; ++b)
+	    {
+	      if (local)
+	      {
+		if (getLocalSuperLUCoordinate(local_blocks.row_global_coors[row_idx],
+					      local_blocks.dense_img_coors[b], img_from, img_size,
+					      lc[b]))
+		  ++inside;
+	      }
+	      else
+	      {
+		for (unsigned int p = 0; p < NOp; ++p)
+		  lc[b][p] =
+		    local_blocks.row_local_coors[row_idx][p] + local_blocks.dense_img_coors[b][p];
+		++inside;
+	      }
+	    }
+	    if (inside == 0)
+	      continue;
+	    if (inside != bs)
+	      throw std::runtime_error("getLupanarSolver: " + prefix +
+				       ": a site block is cut by the domain");
+	    long long site = -1;
+	    const std::size_t lrow = kept.size();
+	    state->x_coor.resize((lrow + 1) * bs);
+	    for (std::size_t b = 0; b < bs; ++b)
+	    {
+	      const long long idx = (long long)img_num.index(
+		local_blocks.row_global_coors[row_idx], local_blocks.dense_img_coors[b], "row");
+	      const std::size_t a = (std::size_t)(idx % (long long)bs);
+	      if (b == 0)
+		site = idx / (long long)bs;
+	      if (lrow == 0)
+		pr[b] = a;
+	      if (idx / (long long)bs != site || pr[b] != a)
+		throw std::runtime_error("getLupanarSolver: " + prefix +
+					 ": the rows of a block are not one site");
+	      state->x_coor[lrow * bs + a] = lc[b];
+	    }
+	    if (!lrow_of_site.emplace(site, lrow).second)
+	      throw std::runtime_error("getLupanarSolver: " + prefix + ": repeated row");
+	    kept.push_back(row_idx);
+	    A.row_gid.push_back(site);
+	  }
+	  const std::size_t nloc = kept.size();
+	  if (local && nloc != (std::size_t)img_num.nsites)
+	    throw std::runtime_error("getLupanarSolver: " + prefix +
+				     ": the local rows do not fill the domain");
+	  {
+	    std::vector<char> seen(bs, 0);
+	    for (std::size_t b = 0; b < bs && nloc > 0; ++b)
+	    {
+	      if (pr[b] >= bs || seen[pr[b]])
+		throw std::runtime_error("getLupanarSolver: " + prefix +
+					 ": the dense indices do not number the site block");
+	      seen[pr[b]] = 1;
+	    }
+	  }
+
+	  // Blocks; the local solver drops the ones that leave the domain (Dirichlet)
+	  A.k = (int)bs;
+	  A.ptr.assign(1, 0);
+	  bool have_pc = false;
+	  for (std::size_t lrow = 0; lrow < nloc; ++lrow)
+	  {
+	    for (const auto& block : local_blocks.rows[kept[lrow]])
+	    {
+	      if (block.data.size() != bs * bs)
+		throw std::runtime_error("getLupanarSolver: " + prefix + ": unexpected block size");
+	      Coor<NOp> unused{{}};
+	      std::size_t inside = 0;
+	      for (std::size_t c = 0; c < bs; ++c)
+		if (!local || getLocalSuperLUCoordinate(block.dom_coor,
+							local_blocks.dense_dom_coors[c], dom_from,
+							dom_size, unused))
+		  ++inside;
+	      if (inside == 0)
+		continue;
+	      if (inside != bs)
+		throw std::runtime_error("getLupanarSolver: " + prefix +
+					 ": a site block is cut by the domain");
+	      long long site = -1;
+	      for (std::size_t c = 0; c < bs; ++c)
+	      {
+		const long long idx = (long long)dom_num.index(
+		  block.dom_coor, local_blocks.dense_dom_coors[c], "column");
+		const std::size_t a = (std::size_t)(idx % (long long)bs);
+		if (c == 0)
+		  site = idx / (long long)bs;
+		if (!have_pc)
+		  pc[c] = a;
+		if (idx / (long long)bs != site || pc[c] != a)
+		  throw std::runtime_error("getLupanarSolver: " + prefix +
+					   ": the columns of a block are not one site");
+	      }
+	      have_pc = true;
+	      const std::size_t at = A.val.size();
+	      A.val.resize(at + bs * bs);
+	      for (std::size_t r = 0; r < bs; ++r)
+		for (std::size_t c = 0; c < bs; ++c)
+		  A.val[at + pr[r] * bs + pc[c]] = block.data[r * bs + c];
+	      A.col_gid.push_back(site);
+	    }
+	    A.ptr.push_back((int)A.col_gid.size());
+	  }
+
+	  // Where the solution goes
+	  state->y_coor.resize(nloc * bs);
+	  std::vector<char> seen(nloc * bs, 0);
+	  for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
+	    for (std::size_t b = 0; b < bs; ++b)
+	    {
+	      Coor<NOp> c{{}};
+	      if (local)
+	      {
+		if (!getLocalSuperLUCoordinate(local_blocks.dom_row_global_coors[row_idx],
+					       local_blocks.dense_dom_coors[b], dom_from, dom_size,
+					       c))
+		  continue;
+	      }
+	      else
+	      {
+		for (unsigned int p = 0; p < NOp; ++p)
+		  c[p] = local_blocks.dom_row_local_coors[row_idx][p] +
+			 local_blocks.dense_dom_coors[b][p];
+	      }
+	      const long long idx = (long long)dom_num.index(
+		local_blocks.dom_row_global_coors[row_idx], local_blocks.dense_dom_coors[b],
+		"solution row");
+	      auto it = lrow_of_site.find(idx / (long long)bs);
+	      if (it == lrow_of_site.end())
+		throw std::runtime_error(
+		  "getLupanarSolver: " + prefix +
+		  ": the rows and the columns of the operator are distributed differently over "
+		  "the ranks");
+	      const std::size_t at = it->second * bs + (std::size_t)(idx % (long long)bs);
+	      if (seen[at])
+		throw std::runtime_error("getLupanarSolver: " + prefix +
+					 ": repeated solution row");
+	      seen[at] = 1;
+	      state->y_coor[at] = c;
+	    }
+	  if (std::find(seen.begin(), seen.end(), (char)0) != seen.end())
+	    throw std::runtime_error("getLupanarSolver: " + prefix +
+				     ": the solution does not cover the local rows");
+	  state->nloc = nloc;
+	  state->bs = bs;
+	}
+
+	// Factorize now (host) and put the factors on the GPU, in the CUDA context that is current
+	if (cuCtxGetCurrent(&state->cuda_ctx) != CUDA_SUCCESS || !state->cuda_ctx)
+	{
+	  // None yet on this thread: let the runtime bind the primary one of the current device
+	  cudaFree(nullptr);
+	  cudaGetLastError();
+	  if (cuCtxGetCurrent(&state->cuda_ctx) != CUDA_SUCCESS || !state->cuda_ctx)
+	    throw std::runtime_error("getLupanarSolver: no CUDA context on this thread");
+	}
+	state->solver = lupanar::create(A, lupanar_options);
+	{
+	  const lupanar::Info& info = lupanar::info(state->solver);
+	  long long m_loc = (long long)(state->nloc * state->bs);
+	  state->max_m_loc = m_loc;
+	  if (MPI_Allreduce(&m_loc, &state->max_m_loc, 1, MPI_LONG_LONG, MPI_MAX, comm) !=
+	      MPI_SUCCESS)
+	    throw std::runtime_error("getLupanarSolver: MPI_Allreduce failed");
+	  state->n = info.nglobal * (long long)info.k;
+	  std::ostringstream summary;
+	  summary << prefix << " LUPANAR setup " << (local ? "local" : "global")
+		  << " n=" << state->n << " max_m_loc=" << state->max_m_loc
+		  << " ranks=" << info.ranks << " k=" << info.k << " stages=" << info.stages
+		  << " levels=" << info.levels_l << "/" << info.levels_u
+		  << " width=" << info.width_l << "/" << info.width_u
+		  << " ghosts=" << info.ghosts_l << "/" << info.ghosts_u;
+	  appendTimingField(summary, "factor", info.t_factor);
+	  QDPIO::cout << summary.str() << std::endl;
+	}
+
+	Operator<NOp, ComplexD> lupanar_solver_op{
+	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
+	    auto& st = *state;
+	    SuperLUTimer timing;
+	    auto mark_timing = [&]() { return timing_level > 0 ? timing.mark() : 0.0; };
+	    const std::string order_cols = detail::remove_dimensions(x.order, op.i.order);
+	    const std::size_t nrhs = x.volume(order_cols);
+	    if (nrhs == 0)
+	      return;
+
+	    // Host tensors in the layout of the sparse operator, as getSuperLUSolver
+	    std::map<char, int> x_sparse_kvdim = sp.i.kvdim();
+	    for (char c : order_cols)
+	      x_sparse_kvdim[c] = x.kvdim().at(c);
+	    auto y_sparse = y.rename_dims(rd);
+	    std::map<char, int> y_sparse_kvdim = sp.d.kvdim();
+	    for (char c : order_cols)
+	      y_sparse_kvdim[c] = x.kvdim().at(c);
+	    auto xh = local ? x.make_sure(sp.i.order + order_cols, OnHost)
+			    : sp.i.template make_compatible<NOp + 1, ComplexD>(
+				sp.i.order + order_cols, x_sparse_kvdim, OnHost);
+	    if (!local)
+	      x.copyTo(xh);
+	    auto yh = local ? y_sparse.make_compatible(sp.d.order + order_cols, {}, OnHost)
+			    : sp.d.template make_compatible<NOp + 1, ComplexD>(
+				sp.d.order + order_cols, y_sparse_kvdim, OnHost);
+	    yh.set_zero();
+	    auto x_local = xh.getLocal();
+	    auto y_local = yh.getLocal();
+
+	    const ComplexD* xptr = x_local.data();
+	    ComplexD* yptr = y_local.data();
+	    const auto x_strides =
+	      superbblas::detail::get_strides<std::size_t>(x_local.size, superbblas::FastToSlow);
+	    const auto y_strides =
+	      superbblas::detail::get_strides<std::size_t>(y_local.size, superbblas::FastToSlow);
+
+	    auto rhs_offsets = [&](const auto& t, const auto& strides, const std::string& what) {
+	      std::vector<std::size_t> out(nrhs, 0);
+	      if (order_cols.empty())
+		return out;
+	      std::vector<int> rhs_sizes;
+	      rhs_sizes.reserve(order_cols.size());
+	      for (char c : order_cols)
+		rhs_sizes.push_back(t.kvdim().at(c));
+	      for (std::size_t c = 0; c < nrhs; ++c)
+	      {
+		std::size_t off = 0;
+		std::size_t tcol = c;
+		for (std::size_t k = 0; k < order_cols.size(); ++k)
+		{
+		  int v = (int)(tcol % (std::size_t)rhs_sizes[k]);
+		  tcol /= (std::size_t)rhs_sizes[k];
+		  auto pos = t.order.find(order_cols[k]);
+		  if (pos == std::string::npos)
+		    throw std::runtime_error("LUPANAR: missing RHS label `" +
+					     std::string(1, order_cols[k]) + "` in " + what +
+					     " tensor");
+		  off += (std::size_t)v * strides[(std::size_t)pos];
+		}
+		out[c] = off;
+	      }
+	      return out;
+	    };
+	    const std::vector<std::size_t> x_rhs_off = rhs_offsets(x_local, x_strides, "RHS");
+	    const std::vector<std::size_t> y_rhs_off = rhs_offsets(y_local, y_strides, "solution");
+
+	    // Offsets of LUPANAR's values in the local tensors; they change only if the tensors do
+	    auto site_offsets = [&](const std::vector<Coor<NOp>>& coor, const auto& size,
+				    const auto& strides, Coor<NOp>& last_size,
+				    std::vector<std::size_t>& off, const std::string& what) {
+	      bool same = off.size() == coor.size();
+	      for (unsigned int p = 0; p < NOp && same; ++p)
+		same = last_size[p] == (int)size[p];
+	      if (same)
+		return;
+	      off.resize(coor.size());
+	      for (std::size_t i = 0; i < coor.size(); ++i)
+	      {
+		std::size_t o = 0;
+		for (unsigned int p = 0; p < NOp; ++p)
+		{
+		  if (coor[i][p] < 0 || coor[i][p] >= (int)size[p])
+		    throw std::runtime_error("LUPANAR: " + prefix + ": the " + what +
+					     " tensor does not hold the rows of the solver");
+		  o += (std::size_t)coor[i][p] * strides[p];
+		}
+		off[i] = o;
+	      }
+	      for (unsigned int p = 0; p < NOp; ++p)
+		last_size[p] = (int)size[p];
+	    };
+	    site_offsets(st.x_coor, x_local.size, x_strides, st.x_size, st.x_off, "RHS");
+	    site_offsets(st.y_coor, y_local.size, y_strides, st.y_size, st.y_off, "solution");
+	    const std::size_t nvals = st.nloc * st.bs;
+	    const double t_prepare_tensors = mark_timing();
+
+	    double t_pack_rhs = 0, t_solve = 0, t_scatter_solution = 0;
+	    lupanar::Stats stats;
+	    {
+	      // LUPANAR's context for its buffers and its kernels; superbblas' one comes back at
+	      // the end of the scope, before the tensor copy below
+	      LupanarCudaContextGuard cuda_ctx_guard(st.cuda_ctx);
+	      std::complex<double>* xl = nullptr;
+	      std::complex<double>* yl = nullptr;
+	      lupanar::buffers(st.solver, (int)nrhs, &xl, &yl);
+	      for (std::size_t i = 0; i < nvals; ++i)
+		for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		  xl[i * nrhs + rhs] = xptr[st.x_off[i] + x_rhs_off[rhs]];
+	      t_pack_rhs = mark_timing();
+
+	      lupanar::solve(st.solver, (int)nrhs, xl, yl, &stats);
+	      t_solve = mark_timing();
+
+	      for (std::size_t i = 0; i < nvals; ++i)
+		for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
+		  yptr[st.y_off[i] + y_rhs_off[rhs]] = yl[i * nrhs + rhs];
+	      t_scatter_solution = mark_timing();
+	    }
+	    const std::size_t solve_call = ++st.solves;
+
+	    yh.copyTo(y_sparse);
+	    const double t_copy_output = mark_timing();
+	    const double t_total = timing_level > 0 ? timing.total() : 0.0;
+
+	    // One line per application, as the SuperLU_DIST glue: the slowest rank of every phase
+	    // for the global solver, rank 0 for the local one.  `total` is the whole application.
+	    if (timing_level > 0)
+	    {
+	      enum { nfields = 11 };
+	      static const char* const names[nfields] = {
+		"total", "prepare_tensors", "pack_rhs", "solve", "lower", "upper",
+		"mpi_wait", "kernel", "copy", "scatter_solution", "copy_output"};
+	      double times[nfields] = {t_total,
+				       t_prepare_tensors,
+				       t_pack_rhs,
+				       t_solve,
+				       stats.lower,
+				       stats.upper,
+				       stats.mpi_recv + stats.mpi_send,
+				       stats.kernel,
+				       stats.total - stats.lower - stats.upper,
+				       t_scatter_solution,
+				       t_copy_output};
+	      double max_times[nfields];
+	      int comm_rank = 0;
+	      if (MPI_Comm_rank(st.comm, &comm_rank) != MPI_SUCCESS ||
+		  MPI_Reduce(times, max_times, nfields, MPI_DOUBLE, MPI_MAX, 0, st.comm) !=
+		    MPI_SUCCESS)
+		throw std::runtime_error("LUPANAR: MPI_Reduce of the timings failed");
+	      if (comm_rank == 0 && (!st.local || Layout::nodeNumber() == 0))
+	      {
+		const lupanar::Info& info = lupanar::info(st.solver);
+		std::ostringstream summary;
+		summary << prefix << " LUPANAR timing solve=" << solve_call << " nrhs=" << nrhs
+			<< " n=" << st.n << " max_m_loc=" << st.max_m_loc
+			<< " ranks=" << info.ranks << " k=" << info.k
+			<< " kernel=" << (info.kernel == 2 ? "tc" : "simt")
+			<< " levels=" << info.levels_l << "/" << info.levels_u
+			<< " stages=" << info.stages << " max:";
+		for (int i = 0; i < nfields; ++i)
+		  appendTimingField(summary, names[i], max_times[i]);
+		QDPIO::cout << summary.str() << std::endl;
+	      }
+	    }
+	  },
+	  op.i,
+	  op.d,
+	  nullptr,
+	  op.order_t,
+	  op.imgLayout,
+	  op.domLayout,
+	  DenseOperator(),
+	  op.preferred_col_ordering,
+	  false};
+	return lupanar_solver_op;
+#  endif
+      }
+
+      template <std::size_t NOp, typename COMPLEX>
+      Operator<NOp, COMPLEX> getLupanarSolver(Operator<NOp, COMPLEX>, const Options&,
+					      Operator<NOp, COMPLEX>)
+      {
+	throw std::runtime_error("getLupanarSolver: only ComplexD is supported");
+      }
+
       /// Returns a blocking, which should enhanced the performance of the sparse-dense tensor contraction.
       ///
       /// \param op: operator to make the inverse of
@@ -7343,6 +7961,7 @@ namespace Chroma
 	JC,	 // Hanzhao
 	ILU,	 // Hanzhao
 	SUPERLU, // Hanzhao
+	LUPANAR, // block ILU(0) with GPU triangular solves (BUILD_LUPANAR)
 	SHIFT,
 	PROJ,
 	SPINEO,
@@ -7359,6 +7978,7 @@ namespace Chroma
 	{"mr", MR},
 	{"gcr", GCR},
 	{"superlu", SUPERLU},
+	{"lupanar", LUPANAR},
 	{"mg", MG},
 	{"eo", EO},
 	{"hie", HIE},
@@ -7402,6 +8022,8 @@ namespace Chroma
 	return detail::getILU0(op, ops, prec);
       case SUPERLU: // direct sparse solve through SuperLU_DIST
 	return detail::getSuperLUSolver(op, ops, prec);
+      case LUPANAR: // block ILU(0) on the GPU through LUPANAR
+	return detail::getLupanarSolver(op, ops, prec);
       case SHIFT: // shift operator
 	return detail::getShiftedOp(op, ops, prec);
       case PROJ: // projector preconditioner

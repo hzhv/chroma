@@ -61,6 +61,9 @@
 /* SuperLU_DIST is built with NVSHMEM and supports several solver instances per process */
 #cmakedefine BUILD_SUPERLU_NVSHMEM @BUILD_SUPERLU_NVSHMEM@
 
+/* Build with LUPANAR, the block ILU(0) with GPU triangular solves of MGPROTON */
+#cmakedefine BUILD_LUPANAR @BUILD_LUPANAR@
+
 /* Build with PRIMME */
 #cmakedefine BUILD_PRIMME   @BUILD_PRIMME@
 

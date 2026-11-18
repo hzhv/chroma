@@ -2085,6 +2085,14 @@ if( Chroma_ENABLE_SUPERLU_DIST )
   target_link_directories(chromalib PUBLIC ${SUPERLU_DIST_STATIC_LIBRARY_DIRS})
 endif()
 
+if( Chroma_ENABLE_LUPANAR )
+  # Block ILU(0) with GPU triangular solves for MGPROTON (`type=lupanar`), see util/ferm/lupanar.h.
+  # The factorization uses zgetrf/zgetri/zgemm from the BLAS/LAPACK that superbblas links.
+  target_sources(chromalib PRIVATE util/ferm/lupanar.cu)
+  set_target_properties(chromalib PROPERTIES CUDA_STANDARD 17)
+  target_link_libraries(chromalib PUBLIC CUDA::cudart CUDA::cuda_driver)
+endif()
+
 
 if( Chroma_SANITIZER_OPTS )
    target_compile_options(chromalib PRIVATE ${Chroma_SANITIZER_OPTS})

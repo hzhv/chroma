@@ -108,6 +108,14 @@ foreach( EXEC ${ChromaSingleExecs})
   target_include_directories( ${EXEC} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 endforeach()
 
+if( Chroma_ENABLE_LUPANAR )
+  # Standalone check of the LUPANAR library against a serial ILU(0) on rank 0 (MPI, one GPU per rank):
+  #   srun -n P ./t_lupanar N0 N1 N2 N3 P0 P1 P2 P3 k m[,m...] [options]   (usage in t_lupanar.cu)
+  add_executable( t_lupanar t_lupanar.cu )
+  set_target_properties( t_lupanar PROPERTIES CUDA_STANDARD 17 )
+  target_link_libraries( t_lupanar PUBLIC Chroma::chromalib )
+endif()
+
 # The GTest ones
 add_library(GTest ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/gtest/gtest-all.cc)
 target_include_directories(GTest PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../lib)

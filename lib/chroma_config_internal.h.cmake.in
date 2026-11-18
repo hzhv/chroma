@@ -58,6 +58,9 @@
 /* Build with SuperLU_DIST */
 #cmakedefine BUILD_SUPERLU_DIST @BUILD_SUPERLU_DIST@
 
+/* SuperLU_DIST is built with NVSHMEM and supports several solver instances per process */
+#cmakedefine BUILD_SUPERLU_NVSHMEM @BUILD_SUPERLU_NVSHMEM@
+
 /* Build with PRIMME */
 #cmakedefine BUILD_PRIMME   @BUILD_PRIMME@
 

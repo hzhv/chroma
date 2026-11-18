@@ -28,6 +28,7 @@ option(Chroma_ENABLE_LAPACK "Enable Lapack Binding in QDPLapack" OFF)
 option(Chroma_ENABLE_OPENMP "Enable OpenMP" OFF)
 option(Chroma_ENABLE_SUPERBBLAS  "Enable tasks using Superbblas" OFF)
 option(Chroma_ENABLE_SUPERLU_DIST "Enable MGPROTON SuperLU_DIST solver" OFF)
+option(Chroma_SUPERLU_NVSHMEM "SuperLU_DIST is built with NVSHMEM and supports several solver instances per process" OFF)
 option(Chroma_ENABLE_PRIMME  "Build with PRIMME" OFF)
 option(Chroma_ENABLE_CUDA  "Build with CUDA" OFF)
 option(Chroma_ENABLE_ROCM  "Build with ROCM" OFF)
@@ -228,6 +229,9 @@ if( Chroma_ENABLE_SUPERBBLAS )
   if( Chroma_ENABLE_SUPERLU_DIST )
     set(BUILD_SUPERLU_DIST 1)
   endif()
+  if( Chroma_SUPERLU_NVSHMEM )
+    set(BUILD_SUPERLU_NVSHMEM 1)
+  endif()
 
   # Deal with PRIMME
   if( Chroma_ENABLE_PRIMME )
@@ -238,6 +242,9 @@ endif()
 
 if( Chroma_ENABLE_SUPERLU_DIST AND NOT Chroma_ENABLE_SUPERBBLAS )
   message(FATAL_ERROR "Chroma_ENABLE_SUPERLU_DIST requires Chroma_ENABLE_SUPERBBLAS")
+endif()
+if( Chroma_SUPERLU_NVSHMEM AND NOT Chroma_ENABLE_SUPERLU_DIST )
+  message(FATAL_ERROR "Chroma_SUPERLU_NVSHMEM requires Chroma_ENABLE_SUPERLU_DIST")
 endif()
 
 

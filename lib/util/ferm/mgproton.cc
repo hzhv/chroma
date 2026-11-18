@@ -15,6 +15,69 @@
 #  include "util/ferm/chroma_superlu_dist_wrapper.h"
 #  include <cuda_runtime.h>
 #  include <cuda.h> // driver API: cuCtxGetCurrent/cuCtxSetCurrent to guard superbblas' CUDA context across SuperLU_DIST calls
+#  include <cstdint>
+#  ifdef BUILD_SUPERLU_NVSHMEM
+// SuperLU_DIST built with NVSHMEM and with the multi-instance changes (see SuperLUGpuSolveGlobals):
+// nv_finalize_wrapper exists, and nv_init_wrapper does nothing once NVSHMEM is up. The process-wide state
+// of the GPU triangular solve (oneside.h, and zready_x/zready_lsum in superlu_zdefs.h) comes with the
+// headers; the list below is every one of those globals that SuperLU defines (supernodalForest.c,
+// pzgstrs3d.c).
+#    define SB_SUPERLU_GPU_SOLVE_GLOBALS(X) \
+  X(uint64_t, flag_bc_q) \
+  X(uint64_t, flag_rd_q) \
+  X(int, my_flag_bc) \
+  X(int, my_flag_rd) \
+  X(int, mystatus) \
+  X(int, mystatusmod) \
+  X(int, mystatus_u) \
+  X(int, mystatusmod_u) \
+  X(int, d_msgnum) \
+  X(int, d_status) \
+  X(int, d_status_save) \
+  X(int, d_status_u_save) \
+  X(int, d_statusmod) \
+  X(int, d_statusmod_save) \
+  X(int, d_statusmod_u_save) \
+  X(int, d_nfrecv) \
+  X(int, h_nfrecv) \
+  X(int, d_colnum) \
+  X(int, d_mynum) \
+  X(int, d_mymaskstart) \
+  X(int, d_mymasklength) \
+  X(int, d_rownum) \
+  X(int, d_rowstart) \
+  X(int, d_nfrecvmod) \
+  X(int, h_nfrecvmod) \
+  X(int, d_colnummod) \
+  X(int, d_mynummod) \
+  X(int, d_mymaskstartmod) \
+  X(int, d_mymasklengthmod) \
+  X(int, d_recv_cnt) \
+  X(int, d_flag_mod) \
+  X(int, d_nfrecv_u) \
+  X(int, h_nfrecv_u) \
+  X(int, d_colnum_u) \
+  X(int, d_mynum_u) \
+  X(int, d_mymaskstart_u) \
+  X(int, d_mymasklength_u) \
+  X(int, d_nfrecvmod_u) \
+  X(int, h_nfrecvmod_u) \
+  X(int, d_colnummod_u) \
+  X(int, d_mynummod_u) \
+  X(int, d_mymaskstartmod_u) \
+  X(int, d_mymasklengthmod_u) \
+  X(int, d_recv_cnt_u) \
+  X(int, d_msgnum_u) \
+  X(int, d_flag_mod_u) \
+  X(doublecomplex, zready_x) \
+  X(doublecomplex, zready_lsum)
+extern "C" {
+void nv_finalize_wrapper(void);
+int get_acc_solve(void);
+int nvshmem_my_pe(void);
+int nvshmem_n_pes(void);
+}
+#  endif // BUILD_SUPERLU_NVSHMEM
 #endif
 
 #include <algorithm>
@@ -4449,6 +4512,126 @@ namespace Chroma
 	return ComplexD(v.r, v.i);
       }
 
+      // SuperLU_DIST's GPU triangular solve (SUPERLU_ACC_SOLVE) keeps its NVSHMEM buffers and its
+      // message-count/status arrays in ~50 process-wide globals. Every instance initializes NVSHMEM on
+      // its own grid communicator and overwrites the globals when it factorizes (nv_init_wrapper,
+      // zprepare_multiGPU_buffers, pzgstrs_init_device_lsum_x), and zDestroy_LU frees the current
+      // globals and calls nvshmem_finalize (zdelete_multiGPU_buffers). That is fine with one instance
+      // per process. With several -- one per rank on MPI_COMM_SELF for a domain-decomposition ILU plus
+      // a distributed one -- NVSHMEM may come up on MPI_COMM_SELF, the instances share each other's
+      // buffers, and the first destruction tears NVSHMEM down under the others: a domain ILU0 for the
+      // null vectors plus a global ILU0 on the coarsest level segfaults at the first solve, a domain
+      // ILU0 smoother plus a global ILU0 aborts at exit.
+      //
+      // With BUILD_SUPERLU_NVSHMEM (CMake option Chroma_SUPERLU_NVSHMEM), for a SuperLU_DIST in which
+      // nv_init_wrapper does nothing once NVSHMEM is up, zdelete_multiGPU_buffers only frees, and
+      // nv_finalize_wrapper finalizes: NVSHMEM is initialized once, before the first instance, and
+      // finalized at MPI_Finalize, and each instance installs its own globals before every call into
+      // SuperLU and before its destruction. The solve kernels address NVSHMEM PEs by rank in the
+      // instance's 2D grid (the layer of a 3D grid), so NVSHMEM is initialized on groups of
+      // SB_SUPERLU_NVSHMEM_RANKS consecutive ranks (default: all ranks; Px*Py for a Z-major 3D grid)
+      // and every multi-rank instance checks the numbering. Without it the functions below do nothing
+      // and SuperLU_DIST manages NVSHMEM by itself, as for a single instance.
+#    ifdef BUILD_SUPERLU_NVSHMEM
+      struct SuperLUGpuSolveGlobals {
+	bool have = false;
+#    define SB_X(T, v) T* v = nullptr;
+	SB_SUPERLU_GPU_SOLVE_GLOBALS(SB_X)
+#    undef SB_X
+
+	/// Make SuperLU use this state; all null (a fresh process) before this instance's first call
+	void install() const
+	{
+#    define SB_X(T, v) ::v = v;
+	  SB_SUPERLU_GPU_SOLVE_GLOBALS(SB_X)
+#    undef SB_X
+	}
+
+	/// Take the state SuperLU is using now (right after this instance's pzgssvx)
+	void capture()
+	{
+#    define SB_X(T, v) v = ::v;
+	  SB_SUPERLU_GPU_SOLVE_GLOBALS(SB_X)
+#    undef SB_X
+	  have = true;
+	}
+
+	/// Whether any non-null pointer is shared with `o`
+	bool overlaps(const SuperLUGpuSolveGlobals& o) const
+	{
+	  bool r = false;
+#    define SB_X(T, v) r = r || (v != nullptr && v == o.v);
+	  SB_SUPERLU_GPU_SOLVE_GLOBALS(SB_X)
+#    undef SB_X
+	  return r;
+	}
+      };
+
+      inline int superLUNvshmemFinalizeCallback(MPI_Comm, int, void*, void*)
+      {
+	nv_finalize_wrapper();
+	return MPI_SUCCESS;
+      }
+
+      /// Initialize NVSHMEM before the first SuperLU instance, on groups of SB_SUPERLU_NVSHMEM_RANKS
+      /// consecutive ranks (default: all ranks), and finalize it at MPI_Finalize (delete callback of an
+      /// MPI_COMM_SELF attribute, which MPI runs first in MPI_Finalize). Collective: every rank creates
+      /// its first SuperLU instance at the same point.
+      inline void superLUNvshmemInitOnce()
+      {
+	static bool done = false;
+	static MPI_Comm nvshmem_comm = MPI_COMM_NULL; // kept for the lifetime of NVSHMEM
+	if (done || !get_acc_solve())
+	  return;
+	done = true;
+	int rank = 0, size = 1;
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
+	const char* env = std::getenv("SB_SUPERLU_NVSHMEM_RANKS");
+	const int group = env ? std::atoi(env) : size;
+	if (group <= 0 || size % group != 0)
+	  throw std::runtime_error("SB_SUPERLU_NVSHMEM_RANKS must divide the number of ranks");
+	if (group == size)
+	  nvshmem_comm = MPI_COMM_WORLD;
+	else if (MPI_Comm_split(MPI_COMM_WORLD, rank / group, rank, &nvshmem_comm) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: MPI_Comm_split for NVSHMEM failed");
+	nv_init_wrapper(nvshmem_comm);
+	int keyval = MPI_KEYVAL_INVALID;
+	if (MPI_Comm_create_keyval(MPI_COMM_NULL_COPY_FN, superLUNvshmemFinalizeCallback, &keyval,
+				   nullptr) != MPI_SUCCESS ||
+	    MPI_Comm_set_attr(MPI_COMM_SELF, keyval, nullptr) != MPI_SUCCESS)
+	  throw std::runtime_error("SuperLU_DIST: cannot register the NVSHMEM finalization");
+	detail::log(1, "SuperLU_DIST: NVSHMEM initialized on groups of " + std::to_string(group) +
+			 " ranks, shared by all SuperLU instances, finalized at MPI_Finalize");
+      }
+
+      /// A multi-rank instance's solve kernels put to NVSHMEM PE = rank in its 2D grid (layer)
+      inline void superLUNvshmemCheckGrid(const gridinfo3d_t& grid, const std::string& prefix)
+      {
+	if (!get_acc_solve())
+	  return;
+	int r = 0, s = 1;
+	MPI_Comm_rank(grid.grid2d.comm, &r);
+	MPI_Comm_size(grid.grid2d.comm, &s);
+	if (s > 1 && (nvshmem_n_pes() != s || nvshmem_my_pe() != r))
+	  throw std::runtime_error(
+	    prefix + ": NVSHMEM PE " + std::to_string(nvshmem_my_pe()) + " of " +
+	    std::to_string(nvshmem_n_pes()) + " does not match rank " + std::to_string(r) + " of " +
+	    std::to_string(s) + " in the SuperLU 2D grid; set SB_SUPERLU_NVSHMEM_RANKS=nprow*npcol "
+	    "(Z-major 3D grid)");
+      }
+#    else
+      struct SuperLUGpuSolveGlobals {
+	void install() const {}
+	void capture() {}
+	bool overlaps(const SuperLUGpuSolveGlobals&) const { return false; }
+      };
+
+      inline void superLUNvshmemInitOnce() {}
+
+      inline void superLUNvshmemCheckGrid(const gridinfo3d_t&, const std::string&) {}
+#    endif // BUILD_SUPERLU_NVSHMEM
+
 	      inline int checkedSuperLUCount(std::size_t n, const std::string& what)
 	      {
 		if (n > (std::size_t)std::numeric_limits<int>::max())
@@ -5170,6 +5353,9 @@ namespace Chroma
 	doublecomplex* d_rhs = nullptr;
 	std::size_t d_rhs_capacity = 0;
 
+	// This instance's state of the GPU triangular solve, see SuperLUGpuSolveGlobals
+	SuperLUGpuSolveGlobals gpu_solve_globals;
+
 	SuperLUSolverState(const std::string& prefix_, MPI_Comm comm_, int nprow_, int npcol_,
 			   int npdep_, const SuperLUOptionOverrides& overrides_)
 	  : prefix(prefix_),
@@ -5219,6 +5405,11 @@ namespace Chroma
 
 	~SuperLUSolverState()
 	{
+	  // The teardown below frees SuperLU's current GPU-solve globals: make them this instance's (all
+	  // null if it never ran), and give the other instances theirs back at the end
+	  SuperLUGpuSolveGlobals others;
+	  others.capture();
+	  gpu_solve_globals.install();
 	  if (d_rhs)
 	    cudaFree(d_rhs);
 	  if (solve_init)
@@ -5238,6 +5429,9 @@ namespace Chroma
 	    detail::log(1, prefix + " calling superlu_gridexit3d");
 	    superlu_gridexit3d(&grid);
 	  }
+	  if (others.overlaps(gpu_solve_globals))
+	    others = SuperLUGpuSolveGlobals{};
+	  others.install();
 	}
 
 	SuperLUSolverState(const SuperLUSolverState&) = delete;
@@ -5258,7 +5452,9 @@ namespace Chroma
 	  // caller restores superbblas' original driver context after pzgssvx returns.
 	  int prev_cuda_device = -1;
 	  cudaGetDevice(&prev_cuda_device);
+	  superLUNvshmemInitOnce();
 	  superlu_gridinit3d(comm, nprow, npcol, npdep, &grid);
+	  superLUNvshmemCheckGrid(grid, prefix);
 	  superLUCtxProbe("post-gridinit");
 	  if (prev_cuda_device >= 0)
 	  {
@@ -6460,6 +6656,7 @@ namespace Chroma
 			     cudaMemcpyHostToDevice) != cudaSuccess)
 		throw std::runtime_error("SuperLU_DIST: cudaMemcpy H2D of RHS failed");
 	    }
+	    superlu_state->gpu_solve_globals.install();
 	    if (superlu_state->npdep == 1)
 	      pzgssvx(&superlu_state->options, &superlu_state->A, &superlu_state->ScalePermstruct,
 		      solve_b, ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid.grid2d,
@@ -6470,6 +6667,10 @@ namespace Chroma
 			solve_b, ldb, checkedSuperLUCount(nrhs, "nrhs"), &superlu_state->grid,
 			&superlu_state->LUstruct, &superlu_state->SOLVEstruct, berr.data(),
 			&stat_scope.stat, &info);
+#    ifdef BUILD_SUPERLU_NVSHMEM
+	    if (get_acc_solve())
+	      superlu_state->gpu_solve_globals.capture(); // new ones if this call factorized
+#    endif
 	    if (superlu_state->use_gpures && info == 0)
 	    {
 	      if (cudaMemcpy(b.data(), solve_b, solve_b_count * sizeof(doublecomplex),

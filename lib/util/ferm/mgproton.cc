@@ -4626,11 +4626,46 @@ namespace Chroma
 	return parseSuperLUEnvFlag(env, false);
       }
 
+      /// Elimination order of the ILU(0) factorization, XML option `colperm' of the superlu
+      /// preconditioner.  The SuperLU matrix is numbered site by site in the lexicographic order of
+      /// the physical lattice (see SuperLUSiteNumbering), so
+      ///  - natural:  ColPerm=NATURAL, the lexicographic lattice order (x fastest, then y, z, t); the
+      ///              default;
+      ///  - redblack: ColPerm=MY_PERMC, the order earlier versions of this glue handed to SuperLU:
+      ///              the lattice labels flattened as stored, which on the even-odd coarse layouts
+      ///              puts every even site before every odd one;
+      ///  - metis:    ColPerm=METIS_AT_PLUS_A (SuperLU's default), nested dissection; the only one of
+      ///              the three whose elimination tree lets a 3D process grid (npdep > 1) split work.
+      /// All three keep RowPerm=NOROWPERM, Equil=NO and one dense supernode per lattice site.
+
+      enum class SuperLUSiteOrder { Metis, Natural, RedBlack };
+
+      inline const std::map<std::string, SuperLUSiteOrder>& getSuperLUSiteOrderMap()
+      {
+	static const std::map<std::string, SuperLUSiteOrder> m{
+	  {"metis", SuperLUSiteOrder::Metis},
+	  {"natural", SuperLUSiteOrder::Natural},
+	  {"redblack", SuperLUSiteOrder::RedBlack}};
+	return m;
+      }
+
+      inline const char* getSuperLUSiteOrderName(SuperLUSiteOrder order)
+      {
+	switch (order)
+	{
+	case SuperLUSiteOrder::Metis: return "metis";
+	case SuperLUSiteOrder::Natural: return "natural";
+	case SuperLUSiteOrder::RedBlack: return "redblack";
+	}
+	return "?";
+      }
+
       struct SuperLUOptionOverrides {
 	bool has_ilu_level = false;
 	int ilu_level = SLU_EMPTY;
 	IterRefine_t iter_refine = NOREFINE;
 	bool print_stat = false;
+	SuperLUSiteOrder colperm = SuperLUSiteOrder::Natural; ///< ILU(0) only, see SuperLUSiteOrder
       };
 
       inline const std::map<std::string, IterRefine_t>& getSuperLUIterRefineMap()
@@ -4694,6 +4729,13 @@ namespace Chroma
 	    ops.getValue(path).throw_error("SuperLU_DIST only supports ILU_level=0");
 	}
 
+	if (ops.getValueMaybe("colperm"))
+	{
+	  if (!out.has_ilu_level || out.ilu_level != 0)
+	    ops.getValue("colperm").throw_error("`colperm' is only supported with ilu_level=0");
+	  out.colperm = getOption<SuperLUSiteOrder>(ops, "colperm", getSuperLUSiteOrderMap());
+	}
+
 	auto print_stat = ops.getValueMaybe("print_stat");
 	auto print_stats = ops.getValueMaybe("print_stats");
 	auto PrintStat = ops.getValueMaybe("PrintStat");
@@ -4721,16 +4763,33 @@ namespace Chroma
 	  if (overrides.ilu_level == 0)
 	  {
 	    /* Build per-site dense supernodes for ILU(0). ilu_level_symbfact()
-	       operates on the column-permuted matrix (GAC) and ignores perm_c, so
-	       a user-supplied block partition is only valid when the column
-	       ordering is left untouched. Force NATURAL column ordering and disable
-	       row permutation / equilibration so each lattice site stays a
-	       contiguous dense block (bs x bs), enabling BLAS3 / GPU GEMM. The
-	       partition itself is installed in SuperLUSolverState::initialize(). */
+	       operates on the column-permuted matrix (GAC) and takes the user
+	       supernode partition (supno[i] = i/bs) as given, so the partition is only
+	       valid if the final column ordering keeps every lattice site one aligned
+	       run of bs columns. NATURAL does; so does a whole-site MY_PERMC
+	       permutation (redblack), and METIS keeps the sites of this kind of matrix
+	       intact as well; SuperLUSolverState::checkOrderAfterFactorization()
+	       verifies it after the first factorization. Row permutation and
+	       equilibration stay off so each lattice site remains a contiguous dense
+	       block (bs x bs), enabling BLAS3 / GPU GEMM. The partition itself, and the
+	       MY_PERMC permutation of redblack, are installed in
+	       SuperLUSolverState::initialize(). */
 	    options.UserDefineSupernode = YES;
-	    options.ColPerm = NATURAL;
+	    options.ColPerm = overrides.colperm == SuperLUSiteOrder::Metis	   ? METIS_AT_PLUS_A
+			      : overrides.colperm == SuperLUSiteOrder::RedBlack ? MY_PERMC
+										: NATURAL;
 	    options.RowPerm = NOROWPERM;
 	    options.Equil = NO;
+	    /* With npdep = 1 the factorization is SuperLU's 2D pzgstrf.  With
+	       lookahead_etree=NO it schedules the panels from a pruned dependency graph
+	       (zstatic_schedule) that assumes the fill of a complete LU; on the ILU(0)
+	       pattern of a METIS-ordered matrix the first factorization then deadlocks
+	       (MPI_Wait in pzgstrf2_trsm) or crashes.  lookahead_etree=YES schedules from the
+	       elimination tree and factors correctly (checked with a standalone SuperLU_DIST
+	       driver).  natural and redblack keep the default
+	       so their factorization stays exactly as before. */
+	    if (overrides.colperm == SuperLUSiteOrder::Metis)
+	      options.lookahead_etree = YES;
 	  }
 	}
       }
@@ -5039,7 +5098,8 @@ namespace Chroma
 	std::size_t row_idx = 0;
 	std::size_t dense_idx = 0;
 	int peer = 0;
-	int_t global_row = 0;
+	int_t global_row = 0;	  ///< row (or solution row) in the SuperLU numbering
+	std::size_t tensor_off = 0; ///< local DD path: offset of the row in the local tensor
       };
 
       template <std::size_t NOp>
@@ -5051,6 +5111,9 @@ namespace Chroma
 	int_t nnz_loc = 0;
 	int_t bs = 1; /* dense block size (color*spin*... from the operator); used to
 			 build the user-defined supernode partition for ILU(0) */
+	/* colperm=redblack: new position of every site (length n/bs), handed to SuperLU as a
+	   MY_PERMC column ordering.  Empty for natural and metis. */
+	std::vector<int_t> site_perm;
 	std::vector<int_t> rowptr;
 	std::vector<int_t> colind;
 	std::vector<doublecomplex> nzval;
@@ -5094,6 +5157,11 @@ namespace Chroma
 	bool factorized = false;
 	std::size_t solve_calls = 0;
 	int cuda_device = -1;
+
+	// ILU(0) site ordering (colperm) bookkeeping, see initialize() and
+	// checkOrderAfterFactorization()
+	bool order_checked = false;
+	int_t order_bs = 1;
 
 	// GPU-resident RHS (options.GPURES): when enabled the solver's B/X argument
 	// must be a device pointer so pzgssvx does the B<->X redistribution on the
@@ -5217,6 +5285,33 @@ namespace Chroma
 
 	  zScalePermstructInit(setup.m, setup.n, &ScalePermstruct);
 	  scaleperm_init = true;
+
+	  /* ILU(0) column ordering (colperm, see SuperLUSiteOrder).  The matrix is numbered in
+	     the lexicographic lattice order (SuperLUSiteNumbering), which is what NATURAL
+	     eliminates in; METIS_AT_PLUS_A is computed by SuperLU.  colperm=redblack hands the
+	     red-black site order to SuperLU as a MY_PERMC ordering that moves whole sites:
+	     pzgssvx relabels the rows of GAC by the same perm_c before ilu_level_symbfact(), so
+	     the incomplete factorization is computed on Pc*A*Pc^T, which is exactly the matrix the
+	     glue used to build in red-black order. */
+	  order_bs = setup.bs > 0 ? setup.bs : 1;
+	  if (!setup.site_perm.empty())
+	  {
+	    if (options.ILU_level != 0 || options.UserDefineSupernode != YES ||
+		options.ColPerm != MY_PERMC)
+	      throw std::runtime_error(prefix +
+				       ": a site ordering is only supported for ILU(0) with "
+				       "colperm=redblack");
+	    if ((int_t)setup.site_perm.size() * order_bs != setup.n)
+	      throw std::runtime_error(prefix + ": the site ordering has the wrong size");
+	    for (int_t i = 0; i < setup.n; ++i)
+	      ScalePermstruct.perm_c[i] =
+		(int_t)(setup.site_perm[(std::size_t)(i / order_bs)] * order_bs + i % order_bs);
+	  }
+	  else if (options.ColPerm == MY_PERMC)
+	    throw std::runtime_error(prefix + ": colperm=redblack needs a site ordering");
+	  if (options.UserDefineSupernode == YES)
+	    detail::log(1, prefix + " ILU(0) column ordering: colperm=" +
+			     getSuperLUSiteOrderName(overrides.colperm));
 	  zLUstructInit(setup.n, &LUstruct);
 	  lu_init = true;
 
@@ -5227,8 +5322,8 @@ namespace Chroma
 	     a contiguous range [s*bs, (s+1)*bs); thus supno[i] = i/bs and
 	     xsup[s] = s*bs. This restores BLAS3 / GPU GEMM that singleton
 	     supernodes (the SuperLU default for ILU(0)) destroy. The arrays are
-	     freed by zDestroy_LU(); see applySuperLUOptionOverrides() which also
-	     forces NATURAL column ordering so this partition stays valid. */
+	     freed by zDestroy_LU(); see applySuperLUOptionOverrides() for the column
+	     orderings that keep this partition valid. */
 	  if (options.UserDefineSupernode == YES)
 	  {
 	    const int_t bs = setup.bs > 0 ? setup.bs : 1;
@@ -5286,6 +5381,46 @@ namespace Chroma
 	  return ++solve_calls;
 	}
 
+	// After the first factorization perm_c holds SuperLU's final column ordering (the
+	// requested one composed with the etree postorder).  The user supernode partition
+	// (supno[i] = i/bs) is only valid if every site still occupies one aligned run of bs
+	// consecutive columns; a violation is fatal for every colperm.
+	void checkOrderAfterFactorization()
+	{
+	  if (order_checked || options.UserDefineSupernode != YES)
+	    return;
+	  order_checked = true;
+	  // A site may come out permuted inside its block (METIS does that): the supernode is
+	  // the same set of columns, so only "all bs columns in one aligned block" is required.
+	  const int_t bs = order_bs;
+	  std::size_t broken = 0, moved = 0, reordered = 0;
+	  for (int_t s = 0; (s + 1) * bs <= n; ++s)
+	  {
+	    const int_t block = ScalePermstruct.perm_c[s * bs] / bs;
+	    if (block != s)
+	      ++moved;
+	    bool ok = true, in_order = true;
+	    for (int_t d = 0; d < bs; ++d)
+	    {
+	      const int_t p = ScalePermstruct.perm_c[s * bs + d];
+	      ok = ok && p / bs == block;
+	      in_order = in_order && p == block * bs + d;
+	    }
+	    if (!ok)
+	      ++broken;
+	    else if (!in_order)
+	      ++reordered;
+	  }
+	  const std::string name = getSuperLUSiteOrderName(overrides.colperm);
+	  detail::log(1, prefix + " ILU(0) colperm=" + name + " after the first factorization: sites=" +
+			   std::to_string((long long)(n / bs)) + " moved=" + std::to_string(moved) +
+			   " reordered_inside=" + std::to_string(reordered) +
+			   " split=" + std::to_string(broken));
+	  if (broken > 0)
+	    throw std::runtime_error(prefix + ": colperm=" + name + " split " +
+				     std::to_string(broken) + " sites across supernodes");
+	}
+
 	// Lazily (re)allocate the cached device RHS buffer to hold at least `count`
 	// doublecomplex elements, returning the device pointer for use as B/X.
 	doublecomplex* ensureDeviceRhs(std::size_t count)
@@ -5322,19 +5457,259 @@ namespace Chroma
 	return idx;
       }
 
+      /// SuperLU numbering of the scalar dofs of a lattice operator's image (rows) or domain
+      /// (columns, solution rows):  index = site * bs + dense.
+      ///
+      /// Labels are named as in the operator's image (the sparse operator renames its domain labels;
+      /// see getSuperLUDomainLabels).  The lattice labels are x, y, z, t, X and the layout-blocking
+      /// labels 0, 1, 2, 3, which hold the fastest part of the x, y, z, t coordinate (y_coor = '1' +
+      /// |'1'| * y, as built by getMGProlongator; they have size 1 unless coarse_layout_blocking is
+      /// set).  `dense` flattens FastToSlow the other labels; bs is the product of their sizes.
+      ///
+      /// `site` numbers the lattice sites of the box [from, from+size) (the whole lattice for the
+      /// distributed solver, the rank's domain for the local DD solver) in the lexicographic order
+      /// of the physical lattice: x fastest, then y, z, t.  The physical x follows the operator
+      /// layout, with the parity rules of getXOddityMask_aux on global coordinates:
+      ///   NaturalLayout          x_phys = x*dimX + X
+      ///   XEvenOddLayout         x_phys = 2x + (X+y+z+t)%2      (x is halved)
+      ///   XEvenOddLayoutZeroOdd  x_phys = 2x + (X+y+z+t+1)%2
+      ///   EvensOnlyLayout        x_phys = x                     (the even sites keep their order)
+      /// So every site owns the aligned block of rows [site*bs, (site+1)*bs), and SuperLU's NATURAL
+      /// ordering is the lexicographic lattice order.
+      ///
+      /// storedSite() numbers the same sites by flattening the lattice labels in the order they are
+      /// stored in the tensor, which is how earlier versions of this glue numbered them: on the even-odd
+      /// coarse layouts X is the slowest lattice label, so every even site comes before every odd one.
+      /// colperm=redblack hands that order to SuperLU as a MY_PERMC ordering.
+
+      template <std::size_t NOp>
+      struct SuperLUSiteNumbering {
+	/// positions of x, y, z, t, X, 0, 1, 2, 3 in the tensor order (-1 if absent)
+	int pos[9] = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
+	Coor<NOp> from{{}};
+	Coor<NOp> size{{}};
+	Coor<NOp> global_size{{}};
+	OperatorLayout layout = NaturalLayout;
+	int_t dimX = 1;
+	std::vector<int> lattice_pos, dense_pos; ///< labels, fastest first
+	std::vector<int_t> lattice_strides, dense_strides;
+	int_t bs = 1;
+	int_t nsites = 1;
+	int_t key_min[4] = {0, 0, 0, 0}; ///< smallest physical (x_phys, y, z, t) in the box
+	int_t key_ext[4] = {1, 1, 1, 1}; ///< range of the physical coordinates in the box
+	std::vector<int_t> site_of_key;	 ///< lexicographic site of every physical key, -1 if none
+
+	/// \param order: labels of the tensor, named as in the operator's image
+	/// \param from_: first global coordinate of the box
+	/// \param size_: size of the box
+	/// \param global_size_: size of the whole tensor
+	/// \param layout_: lattice layout of the tensor (Operator::imgLayout or domLayout)
+	/// \param what: name for error messages
+
+	SuperLUSiteNumbering(const std::string& order, const Coor<NOp>& from_, const Coor<NOp>& size_,
+			     const Coor<NOp>& global_size_, OperatorLayout layout_,
+			     const std::string& what)
+	  : from(from_), size(size_), global_size(global_size_), layout(layout_)
+	{
+	  if (order.size() != NOp)
+	    throw std::runtime_error("SuperLU_DIST: " + what + ": unexpected tensor order `" + order +
+				     "'");
+	  const std::string lat = "xyztX0123";
+	  int_t ls = 1, ds = 1;
+	  for (unsigned int p = 0; p < NOp; ++p)
+	  {
+	    auto k = lat.find(order[p]);
+	    if (k == std::string::npos)
+	    {
+	      dense_pos.push_back((int)p);
+	      dense_strides.push_back(ds);
+	      ds *= (int_t)size[p];
+	    }
+	    else
+	    {
+	      pos[k] = (int)p;
+	      lattice_pos.push_back((int)p);
+	      lattice_strides.push_back(ls);
+	      ls *= (int_t)size[p];
+	    }
+	  }
+	  bs = ds;
+	  nsites = ls;
+
+	  dimX = pos[4] < 0 ? 1 : (int_t)size[pos[4]];
+	  if (pos[4] >= 0 && (from[pos[4]] != 0 || size[pos[4]] != global_size[pos[4]]))
+	    throw std::runtime_error("SuperLU_DIST: " + what +
+				     ": the numbered box must contain every value of X");
+	  const bool eo = layout == XEvenOddLayout || layout == XEvenOddLayoutZeroOdd;
+	  if (eo && dimX != 2)
+	    throw std::runtime_error("SuperLU_DIST: " + what +
+				     ": an even-odd layout needs a label X of size 2");
+	  if (layout == EvensOnlyLayout && dimX != 1)
+	    throw std::runtime_error("SuperLU_DIST: " + what +
+				     ": EvensOnlyLayout with a label X of size other than 1");
+
+	  // Rank the sites of the box by their physical key (t, z, y, x_phys)
+	  std::vector<std::array<int_t, 4>> phys((std::size_t)nsites);
+	  for (int d = 0; d < 4; ++d)
+	    key_min[d] = std::numeric_limits<int_t>::max();
+	  std::array<int_t, 4> key_max{{0, 0, 0, 0}};
+	  for (int_t s = 0; s < nsites; ++s)
+	  {
+	    physical(storedCoor(s), phys[(std::size_t)s].data());
+	    for (int d = 0; d < 4; ++d)
+	    {
+	      key_min[d] = std::min(key_min[d], phys[(std::size_t)s][d]);
+	      key_max[d] = std::max(key_max[d], phys[(std::size_t)s][d]);
+	    }
+	  }
+	  std::size_t nkeys = 1;
+	  for (int d = 0; d < 4; ++d)
+	  {
+	    key_ext[d] = key_max[d] - key_min[d] + 1;
+	    nkeys *= (std::size_t)key_ext[d];
+	  }
+	  if (nkeys > (std::size_t)nsites * 64)
+	    throw std::runtime_error("SuperLU_DIST: " + what +
+				     ": the lattice labels do not form a lattice box");
+	  site_of_key.assign(nkeys, -1);
+	  for (int_t s = 0; s < nsites; ++s)
+	  {
+	    int_t& k = site_of_key[(std::size_t)key(phys[(std::size_t)s].data())];
+	    if (k != -1)
+	      throw std::runtime_error("SuperLU_DIST: " + what +
+				       ": two sites have the same physical coordinates");
+	    k = 0;
+	  }
+	  int_t r = 0;
+	  for (auto& k : site_of_key)
+	    if (k == 0)
+	      k = r++;
+	}
+
+	/// Global coordinate of the site `s` of the box in the stored order
+
+	Coor<NOp> storedCoor(int_t s) const
+	{
+	  Coor<NOp> c = from;
+	  for (std::size_t i = 0; i < lattice_pos.size(); ++i)
+	  {
+	    const int p = lattice_pos[i];
+	    c[p] = from[p] + (int)(s % (int_t)size[p]);
+	    s /= (int_t)size[p];
+	  }
+	  return c;
+	}
+
+	/// Physical coordinates (x_phys, y, z, t) of the global coordinate `c`
+
+	void physical(const Coor<NOp>& c, int_t* p) const
+	{
+	  auto v = [&](int k) -> int_t { return pos[k] < 0 ? 0 : (int_t)c[pos[k]]; };
+	  auto n = [&](int k) -> int_t { return pos[k] < 0 ? 1 : (int_t)global_size[pos[k]]; };
+	  int_t q[4];
+	  for (int d = 0; d < 4; ++d)
+	    q[d] = v(5 + d) + n(5 + d) * v(d); // the blocking label is the fastest part
+	  const int_t X = v(4);
+	  p[0] = q[0];
+	  if (layout == NaturalLayout)
+	    p[0] = q[0] * dimX + X;
+	  else if (layout == XEvenOddLayout)
+	    p[0] = 2 * q[0] + (X + q[1] + q[2] + q[3]) % 2;
+	  else if (layout == XEvenOddLayoutZeroOdd)
+	    p[0] = 2 * q[0] + (X + q[1] + q[2] + q[3] + 1) % 2;
+	  for (int d = 1; d < 4; ++d)
+	    p[d] = q[d];
+	}
+
+	int_t key(const int_t* p) const
+	{
+	  return (p[0] - key_min[0]) +
+		 key_ext[0] * ((p[1] - key_min[1]) +
+			       key_ext[1] * ((p[2] - key_min[2]) + key_ext[2] * (p[3] - key_min[3])));
+	}
+
+	/// Lexicographic site of the global coordinate `c` (inside the box)
+
+	int_t lexSite(const Coor<NOp>& c) const
+	{
+	  int_t p[4];
+	  physical(c, p);
+	  return site_of_key[(std::size_t)key(p)];
+	}
+
+	/// Site of the global coordinate `c` in the stored order (lattice labels flattened as in the
+	/// tensor)
+
+	int_t storedSite(const Coor<NOp>& c) const
+	{
+	  int_t r = 0;
+	  for (std::size_t i = 0; i < lattice_pos.size(); ++i)
+	    r += ((int_t)c[lattice_pos[i]] - (int_t)from[lattice_pos[i]]) * lattice_strides[i];
+	  return r;
+	}
+
+	/// SuperLU index of the dof at `anchor + dense` (global coordinates)
+
+	int_t index(const Coor<NOp>& anchor, const Coor<NOp>& dense, const std::string& what) const
+	{
+	  Coor<NOp> c{{}};
+	  for (unsigned int p = 0; p < NOp; ++p)
+	  {
+	    const int_t v = (int_t)anchor[p] + (int_t)dense[p];
+	    if (v < (int_t)from[p] || v >= (int_t)from[p] + (int_t)size[p])
+	      throw std::runtime_error("SuperLU_DIST: " + what + " coordinate is out of bounds");
+	    c[p] = (int)v;
+	  }
+	  int_t d = 0;
+	  for (std::size_t i = 0; i < dense_pos.size(); ++i)
+	    d += ((int_t)c[dense_pos[i]] - (int_t)from[dense_pos[i]]) * dense_strides[i];
+	  return lexSite(c) * bs + d;
+	}
+
+	/// colperm=redblack: for every lexicographic site, its position in the stored order
+
+	std::vector<int_t> storedSitePermutation(const std::string& prefix) const
+	{
+	  std::vector<int_t> perm((std::size_t)nsites, -1);
+	  for (int_t s = 0; s < nsites; ++s)
+	  {
+	    const Coor<NOp> c = storedCoor(s);
+	    const int_t l = lexSite(c);
+	    if (l < 0 || l >= nsites || perm[(std::size_t)l] != -1 || storedSite(c) != s)
+	      throw std::runtime_error(prefix + ": the red-black site ordering is not a permutation");
+	    perm[(std::size_t)l] = s;
+	  }
+	  return perm;
+	}
+      };
+
+      /// Labels of the sparse operator's domain, named by their image labels.  The sparse operator
+      /// renames the domain labels (`rd'), and SuperLUSiteNumbering finds the lattice labels by name.
+
+      template <std::size_t NOp>
+      std::string getSuperLUDomainLabels(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks)
+      {
+	std::string labels = local_blocks.sp.d.order;
+	for (unsigned int p = 0; p < NOp; ++p)
+	  labels[local_blocks.img_to_dom_pos[p]] = local_blocks.sp.i.order[p];
+	return labels;
+      }
+
       template <std::size_t NOp>
       SuperLUMatrixSetup<NOp>
       buildSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
 			      const std::string& prefix, MPI_Comm superlu_comm,
-			      bool dense_blocks)
+			      bool dense_blocks, OperatorLayout img_layout,
+			      OperatorLayout dom_layout, SuperLUSiteOrder colperm)
       {
 	SuperLUMatrixSetup<NOp> setup;
 	const auto img_dims = kvcoors<NOp>(local_blocks.sp.i.order, local_blocks.sp.i.kvdim());
 	const auto dom_dims = kvcoors<NOp>(local_blocks.sp.d.order, local_blocks.sp.d.kvdim());
-	const auto img_strides =
-	  superbblas::detail::get_strides<int_t>(img_dims, superbblas::FastToSlow);
-	const auto dom_strides =
-	  superbblas::detail::get_strides<int_t>(dom_dims, superbblas::FastToSlow);
+	const Coor<NOp> zero{{}};
+	const SuperLUSiteNumbering<NOp> img_num(local_blocks.sp.i.order, zero, img_dims, img_dims,
+						img_layout, prefix + " image");
+	const SuperLUSiteNumbering<NOp> dom_num(getSuperLUDomainLabels(local_blocks), zero, dom_dims,
+						dom_dims, dom_layout, prefix + " domain");
 	const int_t global_rows = (int_t)volume(local_blocks.sp.i.kvdim(), local_blocks.sp.i.order);
 	const int_t global_cols = (int_t)volume(local_blocks.sp.d.kvdim(), local_blocks.sp.d.order);
 	if (global_rows != global_cols)
@@ -5346,6 +5721,11 @@ namespace Chroma
 	setup.fst_row = partition.fst_row;
 	setup.m_loc = partition.m_loc;
 	setup.bs = (int_t)local_blocks.bs;
+	if (dense_blocks && (img_num.bs != setup.bs || dom_num.bs != setup.bs))
+	  throw std::runtime_error(prefix + ": ILU(0) needs the non-lattice labels to be the dense "
+				   "site block");
+	if (dense_blocks && colperm == SuperLUSiteOrder::RedBlack)
+	  setup.site_perm = img_num.storedSitePermutation(prefix);
 
 	std::vector<std::vector<SuperLUScalarRowRef<NOp>>> rows_by_peer(
 	  (std::size_t)partition.world);
@@ -5357,9 +5737,8 @@ namespace Chroma
 	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
 	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
 	  {
-	    int_t global_row = flattenSuperLUIndex(local_blocks.row_global_coors[row_idx],
-						   local_blocks.dense_img_coors[dense_idx],
-						   img_dims, img_strides, "row");
+	    int_t global_row = img_num.index(local_blocks.row_global_coors[row_idx],
+					     local_blocks.dense_img_coors[dense_idx], "row");
 	    int owner = partition.ownerOf(global_row);
 	    rows_by_peer[(std::size_t)owner].push_back(
 	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, owner, global_row});
@@ -5374,9 +5753,8 @@ namespace Chroma
 	for (std::size_t row_idx = 0; row_idx < local_blocks.dom_nrows; ++row_idx)
 	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
 	  {
-	    int_t global_col = flattenSuperLUIndex(local_blocks.dom_row_global_coors[row_idx],
-						   local_blocks.dense_dom_coors[dense_idx],
-						   dom_dims, dom_strides, "solution column");
+	    int_t global_col = dom_num.index(local_blocks.dom_row_global_coors[row_idx],
+					     local_blocks.dense_dom_coors[dense_idx], "solution column");
 	    int owner = partition.ownerOf(global_col);
 	    sol_rows_by_peer[(std::size_t)owner].push_back(
 	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, owner, global_col});
@@ -5443,9 +5821,8 @@ namespace Chroma
 	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
 	  for (std::size_t dense_r = 0; dense_r < local_blocks.bs; ++dense_r)
 	  {
-	    int_t global_row = flattenSuperLUIndex(local_blocks.row_global_coors[row_idx],
-						   local_blocks.dense_img_coors[dense_r], img_dims,
-						   img_strides, "row");
+	    int_t global_row = img_num.index(local_blocks.row_global_coors[row_idx],
+					     local_blocks.dense_img_coors[dense_r], "row");
 	    int owner = partition.ownerOf(global_row);
 	    auto& send = triplets_by_peer[(std::size_t)owner];
 
@@ -5462,8 +5839,7 @@ namespace Chroma
 		  continue;
 
 		int_t global_col =
-		  flattenSuperLUIndex(block_entry.dom_coor, local_blocks.dense_dom_coors[dense_c],
-				      dom_dims, dom_strides, "column");
+		  dom_num.index(block_entry.dom_coor, local_blocks.dense_dom_coors[dense_c], "column");
 		send.push_back({global_row, global_col, toSuperLUComplex(value)});
 	      }
 	  }
@@ -5554,7 +5930,8 @@ namespace Chroma
       buildLocalSuperLUMatrixSetup(const ExplicitLocalBlockRows<NOp, ComplexD>& local_blocks,
 				   const Tensor<NOp, ComplexD>& img,
 				   const Tensor<NOp, ComplexD>& dom, const std::string& prefix,
-				   bool dense_blocks)
+				   bool dense_blocks, OperatorLayout img_layout,
+				   OperatorLayout dom_layout, SuperLUSiteOrder colperm)
       {
 	SuperLUMatrixSetup<NOp> setup;
 	const Coor<NOp> zero{{}};
@@ -5574,6 +5951,20 @@ namespace Chroma
 	setup.fst_row = 0;
 	setup.m_loc = setup.m;
 	setup.bs = (int_t)local_blocks.bs;
+	/* SuperLU numbers the rank's domain lexicographically (SuperLUSiteNumbering on the local
+	   box); the RHS and the solution are read and written at the row's offset in the local
+	   tensor, kept in SuperLUScalarRowRef::tensor_off. */
+	const SuperLUSiteNumbering<NOp> img_num(local_blocks.sp.i.order, img_local_from,
+						img_local_dims, img.size, img_layout,
+						prefix + " local image");
+	const SuperLUSiteNumbering<NOp> dom_num(getSuperLUDomainLabels(local_blocks), dom_local_from,
+						dom_local_dims, dom.size, dom_layout,
+						prefix + " local domain");
+	if (dense_blocks && (img_num.bs != setup.bs || dom_num.bs != setup.bs))
+	  throw std::runtime_error(prefix + ": ILU(0) needs the non-lattice labels to be the dense "
+				   "site block");
+	if (dense_blocks && colperm == SuperLUSiteOrder::RedBlack)
+	  setup.site_perm = img_num.storedSitePermutation(prefix);
 
 	for (std::size_t row_idx = 0; row_idx < local_blocks.nrows; ++row_idx)
 	  for (std::size_t dense_idx = 0; dense_idx < local_blocks.bs; ++dense_idx)
@@ -5583,9 +5974,12 @@ namespace Chroma
 					   local_blocks.dense_img_coors[dense_idx], img_local_from,
 					   img_local_dims, local_row_coor))
 	      continue;
-	    int_t local_row = flattenSuperLUIndex(local_row_coor, zero, img_local_dims,
-						  img_local_strides, "local DD row");
-	    setup.send_rows.push_back(SuperLUScalarRowRef<NOp>{row_idx, dense_idx, 0, local_row});
+	    const int_t tensor_off = flattenSuperLUIndex(local_row_coor, zero, img_local_dims,
+							 img_local_strides, "local DD row");
+	    const int_t local_row = img_num.index(local_blocks.row_global_coors[row_idx],
+						  local_blocks.dense_img_coors[dense_idx], "local DD row");
+	    setup.send_rows.push_back(
+	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, 0, local_row, (std::size_t)tensor_off});
 	  }
 	std::sort(setup.send_rows.begin(), setup.send_rows.end(),
 		  [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
@@ -5605,10 +5999,13 @@ namespace Chroma
 					   local_blocks.dense_dom_coors[dense_idx], dom_local_from,
 					   dom_local_dims, local_row_coor))
 	      continue;
-	    int_t local_row = flattenSuperLUIndex(local_row_coor, zero, dom_local_dims,
-						  dom_local_strides, "local DD solution row");
+	    const int_t tensor_off = flattenSuperLUIndex(local_row_coor, zero, dom_local_dims,
+							 dom_local_strides, "local DD solution row");
+	    const int_t local_row =
+	      dom_num.index(local_blocks.dom_row_global_coors[row_idx],
+			    local_blocks.dense_dom_coors[dense_idx], "local DD solution row");
 	    setup.send_sol_rows.push_back(
-	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, 0, local_row});
+	      SuperLUScalarRowRef<NOp>{row_idx, dense_idx, 0, local_row, (std::size_t)tensor_off});
 	  }
 	std::sort(setup.send_sol_rows.begin(), setup.send_sol_rows.end(),
 		  [](const SuperLUScalarRowRef<NOp>& a, const SuperLUScalarRowRef<NOp>& b) {
@@ -5646,8 +6043,9 @@ namespace Chroma
 					   local_blocks.dense_img_coors[dense_r], img_local_from,
 					   img_local_dims, local_row_coor))
 	      continue;
-	    int_t local_row = flattenSuperLUIndex(local_row_coor, zero, img_local_dims,
-						  img_local_strides, "local DD matrix row");
+	    const int_t local_row = img_num.index(local_blocks.row_global_coors[row_idx],
+						  local_blocks.dense_img_coors[dense_r],
+						  "local DD matrix row");
 
 	    for (const auto& block_entry : local_blocks.rows[row_idx])
 	      for (std::size_t dense_c = 0; dense_c < local_blocks.bs; ++dense_c)
@@ -5667,8 +6065,9 @@ namespace Chroma
 					       dom_local_from, dom_local_dims, local_col))
 		  continue;
 
-		int_t local_col_idx = flattenSuperLUIndex(
-		  local_col, zero, dom_local_dims, dom_local_strides, "local DD matrix column");
+		const int_t local_col_idx =
+		  dom_num.index(block_entry.dom_coor, local_blocks.dense_dom_coors[dense_c],
+				"local DD matrix column");
 		triplets.push_back({local_row, local_col_idx, toSuperLUComplex(value)});
 	      }
 	  }
@@ -5852,8 +6251,11 @@ namespace Chroma
 	   bs x bs blocks to be stored (no intra-block zero dropping). */
 	const bool dense_blocks = superlu_options.has_ilu_level && superlu_options.ilu_level == 0;
 	auto setup = std::make_shared<SuperLUMatrixSetup<NOp>>(
-	  local_superlu ? buildLocalSuperLUMatrixSetup(local_blocks, op.i, op.d, prefix, dense_blocks)
-			: buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm, dense_blocks));
+	  local_superlu
+	    ? buildLocalSuperLUMatrixSetup(local_blocks, op.i, op.d, prefix, dense_blocks,
+					   op.imgLayout, op.domLayout, superlu_options.colperm)
+	    : buildSuperLUMatrixSetup(local_blocks, prefix, superlu_comm, dense_blocks,
+				      op.imgLayout, op.domLayout, superlu_options.colperm));
 	auto superlu_state = std::make_shared<SuperLUSolverState<NOp>>(
 	  prefix, superlu_comm, nprow, npcol, npdep, superlu_options);
 
@@ -5986,7 +6388,7 @@ namespace Chroma
 	    {
 	      const auto& row = setup->send_rows[i];
 	      std::size_t base = local_superlu
-				   ? (std::size_t)row.global_row
+				   ? row.tensor_off
 				   : x_row_off[row.row_idx] + x_dense_off[row.dense_idx];
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
 	      {
@@ -6086,6 +6488,8 @@ namespace Chroma
 	      throw std::runtime_error("SuperLU_DIST: pzgssvx3d failed with info=" +
 				       std::to_string(info));
 	    const std::size_t solve_call = superlu_state->markFactorized();
+	    if (solve_fact == DOFACT)
+	      superlu_state->checkOrderAfterFactorization();
 
 	    std::vector<doublecomplex> send_sol;
 	    send_sol.reserve(setup->recv_sol_local_rows.size() * nrhs);
@@ -6113,7 +6517,7 @@ namespace Chroma
 	    {
 	      const auto& row = setup->send_sol_rows[i];
 	      std::size_t base = local_superlu
-				   ? (std::size_t)row.global_row
+				   ? row.tensor_off
 				   : y_row_off[row.row_idx] + y_dense_off[row.dense_idx];
 	      for (std::size_t rhs = 0; rhs < nrhs; ++rhs)
 		yptr[checked_offset(base, y_rhs_off[rhs], y_volume, "solution")] =

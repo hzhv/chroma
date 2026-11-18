@@ -1841,37 +1841,6 @@ namespace Chroma
 	    b.scale(-1).addTo(nv);      // -b + nv = -b + A^{-1}Ab = -b + y = -e
 	    b.release();
 
-	    // How close to the near-null space are these vectors actually?  Every conclusion so
-	    // far about why one null-vector strategy beats another has been inferred from how the
-	    // COARSE operator behaves (4.9 MR steps per solve for a dd-preconditioned solve
-	    // against 69.4 for an unpreconditioned one), never measured on the vectors.
-	    //
-	    // nv is the residual of solving Ax=b, so ||A*nv||/||nv|| is the direct test: a genuine
-	    // near-null vector has A*v ~ 0, and for an eigenvector this ratio is |lambda|.  If the
-	    // dd-preconditioned run shows a systematically LARGER ratio than the unpreconditioned
-	    // ones, the claim that its residual is shaped by the preconditioned operator's
-	    // spectrum rather than A's own becomes a measurement instead of an inference.  If the
-	    // ratios come out alike, that explanation is wrong.
-	    //
-	    // Costs num_null_vecs extra matvecs, negligible against a setup that already ran
-	    // thousands of MR steps, but gated anyway so ordinary runs are untouched.
-	    if (std::getenv("SB_NV_PROBE"))
-	    {
-	      auto Anv = nv.make_compatible();
-	      op(nv, Anv);
-	      auto rn = div(norm<1>(Anv, "n"), norm<1>(nv, "n"))
-			  .make_sure(none, OnHost, OnEveryoneReplicated);
-	      std::vector<double> v;
-	      for (unsigned int i = 0; i < num_null_vecs; ++i)
-		v.push_back((double)rn.get(Coor<1>{(int)i}));
-	      std::sort(v.begin(), v.end());
-	      const std::size_t n = v.size();
-	      QDPIO::cout << "NVPROBE |A*v|/|v| n: " << n << " min: " << detail::tostr(v[0], 4)
-			  << " q1: " << detail::tostr(v[n / 4], 4)
-			  << " med: " << detail::tostr(v[n / 2], 4)
-			  << " q3: " << detail::tostr(v[n * 3 / 4], 4)
-			  << " max: " << detail::tostr(v[n - 1], 4) << std::endl;
-	    }
 	  }
 	  else
 	  {
@@ -1980,35 +1949,6 @@ namespace Chroma
 	      auto svd_s =
 		std::get<1>(svd_result).template cast<COMPLEX>(); // get the singular values
 	      std::get<2>(svd_result).release(); // release the right singular vectors
-
-	      // Singular value decay of the block-local null vectors, normalised by s_0.
-	      //
-	      // This SVD runs independently per block (8192 of them for 32^3x64 with 4^4 blocking,
-	      // the batch dimensions here) on a (block sites x colour x spin) by num_null_vecs
-	      // matrix, and only the leading num_colors left singular vectors survive.  The
-	      // singular values are computed and then thrown away, so nothing has ever shown
-	      // whether those retained directions carry comparable weight.
-	      //
-	      // A slow decay means the raw vectors really do span num_colors directions locally.
-	      // A steep one means the later colours rest on what is numerically noise -- the SVD
-	      // still emits num_colors orthonormal vectors either way, so `ortho summary rank: 24`
-	      // looks identical no matter which is true.  That distinguishes an over-converged
-	      // batch, where a long flat asymptotic phase can drive every column toward the same
-	      // slowest direction, from one stopped while the columns are still diverse.
-	      //
-	      // Aggregated as the L2 norm across blocks for each singular index; per-block output
-	      // would be 16384 rows per run.
-	      if (std::getenv("SB_NV_PROBE"))
-	      {
-		auto sn = norm<1>(svd_s, "^").make_sure(none, OnHost, OnEveryoneReplicated);
-		const int ns = (int)svd_s.kvdim().at('^');
-		const double s0 = (double)sn.get(Coor<1>{0});
-		std::stringstream ss;
-		for (int k = 0; k < ns && k < (int)num_colors + 4; ++k)
-		  ss << " " << detail::tostr((double)sn.get(Coor<1>{k}) / (s0 == 0 ? 1 : s0), 3);
-		QDPIO::cout << "NVPROBE svd s_k/s_0 (nv=" << current_nv << " colors=" << num_colors
-			    << " ns=" << ns << "):" << ss.str() << std::endl;
-	      }
 
 	      if (nv_created + current_nv >= num_null_vecs)
 	      {
@@ -3395,31 +3335,6 @@ namespace Chroma
 	bool with_correction = getOption<bool>(ops, "with_correction", false);
 	std::string prefix = getOption<std::string>(ops, "prefix", "");
 
-	// SB_PART_PROBE=1: print this rank's actual slice of the operator's domain.  The coarse
-	// process grid is chosen by superbblas::partitioning_distributed_procs, which places
-	// factors on the largest local dimension, so the shape cannot be read off `-geom`.  Which
-	// ranks share a coarse t-slab is what decides the size of the factorization "turns".
-	if (std::getenv("SB_PART_PROBE") && op.d.p)
-	{
-	  const int me = (int)Layout::nodeNumber();
-	  if (me >= 0 && me < (int)op.d.p->p.size())
-	  {
-	    const auto& part = op.d.p->p[me];
-	    std::ostringstream os;
-	    os << "SBPART[" << me << "] " << prefix << " order=" << op.d.order << " dim=";
-	    for (std::size_t k = 0; k < op.d.order.size(); ++k)
-	      os << (k ? "," : "") << op.d.dim[k];
-	    os << " from=";
-	    for (std::size_t k = 0; k < op.d.order.size(); ++k)
-	      os << (k ? "," : "") << part[0][k];
-	    os << " size=";
-	    for (std::size_t k = 0; k < op.d.order.size(); ++k)
-	      os << (k ? "," : "") << part[1][k];
-	    std::fprintf(stderr, "%s\n", os.str().c_str());
-	    std::fflush(stderr);
-	  }
-	}
-
 	Tracker _t(std::string("setup dd solver ") + prefix);
 
 	// The per-rank local operator relies on the standard OnEveryone ("tzyx") lattice
@@ -3795,16 +3710,6 @@ namespace Chroma
 	// offset-free Local (MPI_COMM_SELF) frame first, so the host copy becomes a purely local
 	// device->host transfer that every superbblas op supports.  This mirrors the working
 	// diagnostic path `t.getLocal().make_sure(none, OnHost)`.
-	if (std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
-	    std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
-	{
-	  std::fprintf(stderr,
-		       "SLUEXTRACT[%d] ii{dist=%s sub=%d} jj{dist=%s sub=%d} data{dist=%s sub=%d}\n",
-		       (int)Layout::nodeNumber(), sp.ii.dist.c_str(), (int)sp.ii.isSubtensor(),
-		       sp.jj.dist.c_str(), (int)sp.jj.isSubtensor(), sp.data.dist.c_str(),
-		       (int)sp.data.isSubtensor());
-	  std::fflush(stderr);
-	}
 	auto ii_local = sp.ii.getLocal();
 	auto ii_host =
 	  ii_local.isSubtensor() ? ii_local.cloneOn(OnHost) : ii_local.make_sure(none, OnHost);
@@ -4814,9 +4719,7 @@ namespace Chroma
 
       inline bool getSuperLUPrintStatDefault()
       {
-	const char* env = std::getenv("SB_SUPERLU_PRINTSTAT");
-	if (!env)
-	  env = std::getenv("SB_SUPERLU_PRINT_STAT");
+	const char* env = std::getenv("SB_SUPERLU_PRINT_STAT");
 	return parseSuperLUEnvFlag(env, false);
       }
 
@@ -4870,38 +4773,6 @@ namespace Chroma
 	  {"extra", SLU_EXTRA}};
 	return m;
       }
-
-      /// Debug probe for the CUDA context corruption seen after SuperLU_DIST solves on
-      /// multi-rank DD runs.  Enabled with SB_SUPERLU_CTX_PROBE=1; prints the calling
-      /// thread's current driver context, runtime device, and whether a benign runtime
-      /// call still works, so the corrupting call can be bracketed.  Remove when fixed.
-      inline void superLUCtxProbe(const char* tag)
-      {
-	static const bool enabled = []() {
-	  const char* env = std::getenv("SB_SUPERLU_CTX_PROBE");
-	  return env && std::atoi(env) != 0;
-	}();
-	if (!enabled)
-	  return;
-	CUcontext cur = nullptr;
-	CUresult cres = cuCtxGetCurrent(&cur);
-	int dev = -1;
-	cudaError_t derr = cudaGetDevice(&dev);
-	std::size_t mfree = 0, mtot = 0;
-	cudaError_t merr = cudaMemGetInfo(&mfree, &mtot);
-	fprintf(stderr, "SLUPROBE[%d] %-14s ctx=%p(cu=%d) dev=%d(%s) memInfo=%s\n",
-		Layout::nodeNumber(), tag, (void*)cur, (int)cres, dev, cudaGetErrorName(derr),
-		cudaGetErrorName(merr));
-	fflush(stderr);
-      }
-
-      struct SuperLUCtxProbeGuard {
-	const char* tag;
-	~SuperLUCtxProbeGuard()
-	{
-	  superLUCtxProbe(tag);
-	}
-      };
 
       inline SuperLUOptionOverrides getSuperLUOptionOverrides(const Options& ops)
       {
@@ -4991,8 +4862,6 @@ namespace Chroma
       inline void applySuperLUAccOffloadEnvOverride(superlu_dist_options_t& options)
       {
 	const char* env = std::getenv("SB_SUPERLU_ACC_OFFLOAD");
-	if (!env)
-	  env = std::getenv("CHROMA_SUPERLU_ACC_OFFLOAD");
 	if (env)
 	  options.superlu_acc_offload =
 	    parseSuperLUEnvFlag(env, options.superlu_acc_offload != 0) ? 1 : 0;
@@ -5002,8 +4871,6 @@ namespace Chroma
       {
 	static int level = []() {
 	  const char* env = std::getenv("SB_SUPERLU_TIMING");
-	  if (!env)
-	    env = std::getenv("CHROMA_SUPERLU_TIMING");
 	  if (!env)
 	    return 0;
 	  if (std::strcmp(env, "true") == 0 || std::strcmp(env, "TRUE") == 0 ||
@@ -5396,8 +5263,6 @@ namespace Chroma
 	  if (overrides.has_ilu_level && overrides.ilu_level == 0)
 	  {
 	    const char* env = std::getenv("SB_SUPERLU_GPURES");
-	    if (!env)
-	      env = std::getenv("CHROMA_SUPERLU_GPURES");
 	    if (env && parseSuperLUEnvFlag(env, false))
 	    {
 	      if (!setSuperLUGpuRes(options, YES))
@@ -5407,19 +5272,6 @@ namespace Chroma
 	    }
 	  }
 	  first_fact = options.Fact;
-	  // DEBUG PROBE (SB_SUPERLU_CTX_PROBE): confirm whether the GPU-resident RHS flag was
-	  // actually installed in the options struct at construction time. Remove when fixed.
-	  if (std::getenv("SB_SUPERLU_CTX_PROBE") != nullptr &&
-	      std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
-	  {
-	    const char* g = std::getenv("SB_SUPERLU_GPURES");
-	    std::fprintf(stderr,
-			 "SLUGPURES[%d] ctor: env=%s has_ilu=%d ilu_level=%d use_gpures=%d "
-			 "options.GPURES==YES? %d\n",
-			 (int)Layout::nodeNumber(), g ? g : "(null)", (int)overrides.has_ilu_level,
-			 overrides.ilu_level, (int)use_gpures, (int)getSuperLUGpuRes(options));
-	    std::fflush(stderr);
-	  }
 	}
 
 	~SuperLUSolverState()
@@ -5474,7 +5326,6 @@ namespace Chroma
 	  superLUNvshmemInitOnce();
 	  superlu_gridinit3d(comm, nprow, npcol, npdep, &grid);
 	  superLUNvshmemCheckGrid(grid, prefix);
-	  superLUCtxProbe("post-gridinit");
 	  if (prev_cuda_device >= 0)
 	  {
 	    cuda_device = prev_cuda_device;
@@ -6332,46 +6183,6 @@ namespace Chroma
 	}
 	setup.nnz_loc = (int_t)setup.colind.size();
 
-	// Debug dump for the multi-rank zero-pivot investigation (SB_SUPERLU_CTX_PROBE=1):
-	// per parity half (rows [0, m/2) vs [m/2, m)), report how many rows carry a
-	// structural diagonal entry and the aggregate |A_ii|, plus stats of the first
-	// failing pivot row.  Remove when fixed.
-	if (std::getenv("SB_SUPERLU_CTX_PROBE") && std::atoi(std::getenv("SB_SUPERLU_CTX_PROBE")) != 0)
-	{
-	  const int_t half = setup.m_loc / 2;
-	  int_t diag_rows[2] = {0, 0};
-	  double diag_mag[2] = {0.0, 0.0};
-	  int_t row_nnz[2] = {0, 0};
-	  int_t first_nodiag = -1;
-	  for (int_t i = 0; i < setup.m_loc; ++i)
-	  {
-	    const int hidx = i < half ? 0 : 1;
-	    bool has_diag = false;
-	    for (int_t k = setup.rowptr[(std::size_t)i]; k < setup.rowptr[(std::size_t)i + 1]; ++k)
-	    {
-	      ++row_nnz[hidx];
-	      if (setup.colind[(std::size_t)k] == i)
-	      {
-		has_diag = true;
-		diag_mag[hidx] += std::abs(setup.nzval[(std::size_t)k].r) +
-				  std::abs(setup.nzval[(std::size_t)k].i);
-	      }
-	    }
-	    if (has_diag)
-	      ++diag_rows[hidx];
-	    else if (first_nodiag < 0)
-	      first_nodiag = i;
-	  }
-	  fprintf(stderr,
-		  "SLUMAT[%d] m=%lld half=%lld | even: diag_rows=%lld |diag|=%g nnz=%lld | odd: "
-		  "diag_rows=%lld |diag|=%g nnz=%lld | first_row_without_diag=%lld\n",
-		  Layout::nodeNumber(), (long long)setup.m_loc, (long long)half,
-		  (long long)diag_rows[0], diag_mag[0], (long long)row_nnz[0],
-		  (long long)diag_rows[1], diag_mag[1], (long long)row_nnz[1],
-		  (long long)first_nodiag);
-	  fflush(stderr);
-	}
-
 	detail::log(1, prefix + " SuperLU local DD rows=" + std::to_string((long long)setup.m_loc) +
 			 " nnz=" + std::to_string((long long)setup.nnz_loc));
 	return setup;
@@ -6487,10 +6298,6 @@ namespace Chroma
 	// reuse the first LU factorization and only solve new right-hand sides.
 	Operator<NOp, ComplexD> superlu_solver_op{
 	  [=](const Tensor<NOp + 1, ComplexD>& x, Tensor<NOp + 1, ComplexD> y) {
-	    // Declared first so its destructor fires LAST, after stat_scope's (PStatFree):
-	    // catches context corruption from the very end of the lambda.
-	    SuperLUCtxProbeGuard _ctx_probe_guard{"lambda-exit"};
-	    superLUCtxProbe("lambda-entry");
 	    const auto& local_blocks = *local_blocks_ptr;
 	    SuperLUTimer timing;
 	    auto mark_timing = [&]() { return superlu_timing_level > 0 ? timing.mark() : 0.0; };
@@ -6659,12 +6466,10 @@ namespace Chroma
 	    // SuperLU_DIST's GPU setup/solve may leave another CUDA context current on
 	    // this thread. Restore the exact context that owns superbblas' cached streams
 	    // before returning to superbblas tensor copies below.
-	    superLUCtxProbe("pre-init");
 	    SuperLUCudaContextGuard cuda_ctx_guard;
 
 	    superlu_state->initialize(*setup);
 	    superlu_state->activateCudaRuntimeDevice();
-	    superLUCtxProbe("post-init");
 	    const fact_t solve_fact = superlu_state->prepareSolve();
 	    SuperLUStatScope stat_scope;
 	    const double t_superlu_setup = mark_timing();
@@ -6709,7 +6514,6 @@ namespace Chroma
 	    // select a runtime context while superbblas' streams still belong to the saved
 	    // driver context.
 	    cuda_ctx_guard.restore("SuperLU_DIST pzgssvx");
-	    superLUCtxProbe("post-solve");
 	    const double t_pzgssvx3d = mark_timing();
 	    superlu_state->noteSolveReturned();
 	    if (info != 0)
@@ -6753,38 +6557,8 @@ namespace Chroma
 	    }
 	    const double t_scatter_solution = mark_timing();
 
-	    superLUCtxProbe("pre-copyTo");
 	    yh.copyTo(y_sparse);
-	    superLUCtxProbe("post-copyTo");
 	    const double t_copy_output = mark_timing();
-
-	    // SB_SUPERLU_RANKTIME=1: every rank reports its own elapsed time for this apply.
-	    // reportSuperLUTiming below prints from rank 0 only, so the spread across ranks --
-	    // the thing that decides how long the others idle at the next collective -- has never
-	    // been visible.  stderr, not QDPIO::cout, because the latter is master-only.
-	    if (std::getenv("SB_SUPERLU_RANKTIME"))
-	    {
-	      std::fprintf(stderr, "SLURANK[%d] solve=%lld total=%.5f\n", (int)Layout::nodeNumber(),
-			   (long long)solve_call, timing.total());
-	      std::fflush(stderr);
-	    }
-
-	    // SB_SUPERLU_RESID=1: how well did this ILU(0) apply actually solve the local system?
-	    // Nothing on the preconditioner path measures it -- ||x - A_loc*y|| costs an extra
-	    // local matvec -- so it is off by default.  Until now the only figure available was a
-	    // lower bound of 0.927 inferred from the iit1 runs, and those report the residual
-	    // AFTER MR's optimal alpha scaling, which the bare configuration never applies.
-	    if (std::getenv("SB_SUPERLU_RESID"))
-	    {
-	      auto resid = op(y);	   // A_loc * y
-	      x.scale(-1).addTo(resid);	   // resid = A_loc*y - x
-	      auto nr = norm<1>(resid, op.order_t + order_cols);
-	      auto nx = norm<1>(x, op.order_t + order_cols);
-	      std::fprintf(stderr, "SLURESID[%d] solve=%lld rel_resid=%.4e\n",
-			   (int)Layout::nodeNumber(), (long long)solve_call,
-			   (double)max(div(nr, nx)));
-	      std::fflush(stderr);
-	    }
 
 	    if (superlu_timing_level > 0)
 	    {
@@ -6818,34 +6592,6 @@ namespace Chroma
 	  op.preferred_col_ordering,
 	  false};
 
-	// SB_EAGER_FACT=1: pay the one-time numerical factorization here, on every rank at once,
-	// instead of letting each rank pay it lazily at the first application that hands it a
-	// non-zero right-hand side.
-	//
-	// Why it is worth ~3 s: under the `mr(max_its=1)` wrapper a rank whose local coarse RHS is
-	// still zero returns at mr()'s `max(normr0) == 0` guard and never reaches SuperLU, so the
-	// 16 factorizations end up spread over four coarse iterations as the support arrives
-	// (measured order: ranks 0-3, 12-15, 4-7, 8-11).  `SuperLU(ilu0)` applied directly has no
-	// such guard, factorizes on all ranks in one go, and does not pay this.  Full evidence in
-	// docs/AGENT_PROMPT_SUPERLU_STAGGER.md.
-	//
-	// A ZERO right-hand side is enough, because the factorization depends on the matrix and
-	// not on the RHS -- that is exactly why the direct path factorizes on ranks whose local
-	// RHS is still zero.  So the warm-up draws no random numbers and cannot perturb the
-	// production RHS, the initial guess or the random sequence; it only fills the solver's
-	// factor storage, which later applications reuse (`fact=FACTORED`).
-	if (std::getenv("SB_EAGER_FACT"))
-	{
-	  Tracker _t_eager(std::string("superlu eager factorization ") + prefix);
-	  auto warm_x = superlu_solver_op.template make_compatible_dom<NOp + 1>("n", {{'n', 1}});
-	  warm_x.set_zero();
-	  auto warm_y = superlu_solver_op.template make_compatible_img<NOp + 1>("n", {{'n', 1}});
-	  warm_y.set_zero();
-	  superlu_solver_op(warm_x, warm_y);
-	  std::fprintf(stderr, "SBEAGER[%d] %s factorized\n", (int)Layout::nodeNumber(),
-		       prefix.c_str());
-	  std::fflush(stderr);
-	}
 	return superlu_solver_op;
 #  endif
       }
